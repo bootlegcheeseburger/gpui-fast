@@ -209,6 +209,11 @@ ignored = [
 ]
 ignored-paths = ["src/_ownership_and_data_flow.rs", "benches/focus_cleanup.rs"]
 
+[[test]]
+name = "menu_item_state"
+path = "tests/menu_item_state.rs"
+required-features = ["test-support"]
+
 [[example]]
 name = "hello_world"
 path = "examples/hello_world.rs"
