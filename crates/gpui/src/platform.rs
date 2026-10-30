@@ -509,6 +509,15 @@ pub trait Platform: 'static {
     fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>);
     fn on_will_open_app_menu(&self, callback: Box<dyn FnMut()>);
     fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>);
+    /// Installs the callback asked for an app menu item's state each time its
+    /// menu opens. Platforms that only enable or disable items keep the default,
+    /// which forwards `enabled` to [`Platform::on_validate_app_menu_command`].
+    fn on_validate_app_menu_item(
+        &self,
+        mut callback: Box<dyn FnMut(&dyn Action) -> MenuItemState>,
+    ) {
+        self.on_validate_app_menu_command(Box::new(move |action| callback(action).enabled));
+    }
 
     fn thermal_state(&self) -> ThermalState;
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>);

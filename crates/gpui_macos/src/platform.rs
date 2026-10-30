@@ -12,10 +12,10 @@ use futures::channel::oneshot;
 use gpui::{
     Action, ActivationPolicy, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem,
     CursorStyle, ForegroundExecutor, GraphicalEnvironment, KeyContext, Keymap, Menu, MenuItem,
-    OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result, SystemMenuType, Task,
-    ThermalState, WindowAppearance, WindowKind, WindowParams, WindowingRequest,
-    popup::PopupNotSupportedError,
+    MenuItemState, OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result,
+    SystemMenuType, Task, ThermalState, WindowAppearance, WindowKind, WindowParams,
+    WindowingRequest, popup::PopupNotSupportedError,
 };
 use gpui_apple::{
     keychain,
@@ -32,9 +32,10 @@ use objc2::{
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSAppearanceNameVibrantDark,
     NSAppearanceNameVibrantLight, NSApplication, NSApplicationActivationPolicy,
-    NSControlStateValueOn, NSCursor, NSDocumentController, NSEventModifierFlags, NSMenu,
-    NSMenuItem, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSScroller,
-    NSScrollerStyle, NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceWillSleepNotification,
+    NSControlStateValueOff, NSControlStateValueOn, NSCursor, NSDocumentController,
+    NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse, NSModalResponseOK, NSOpenPanel,
+    NSSavePanel, NSScroller, NSScrollerStyle, NSWorkspace, NSWorkspaceDidWakeNotification,
+    NSWorkspaceWillSleepNotification,
 };
 use objc2_foundation::{
     NSActivityOptions, NSArray, NSBundle, NSError, NSInteger, NSProcessInfo, NSString, NSURL,
@@ -183,7 +184,7 @@ pub(crate) struct MacPlatformState {
     system_power_observers_registered: bool,
     quit: Option<Box<dyn FnMut() -> bool>>,
     menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
-    validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
+    validate_menu_item: Option<Box<dyn FnMut(&dyn Action) -> MenuItemState>>,
     will_open_menu: Option<Box<dyn FnMut()>>,
     menu_actions: Vec<Box<dyn Action>>,
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
@@ -246,7 +247,7 @@ impl MacPlatform {
             reopen: None,
             quit: None,
             menu_command: None,
-            validate_menu_command: None,
+            validate_menu_item: None,
             will_open_menu: None,
             menu_actions: Default::default(),
             open_urls: None,
@@ -1054,8 +1055,16 @@ impl Platform for MacPlatform {
         self.0.lock().will_open_menu = Some(callback);
     }
 
-    fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>) {
-        self.0.lock().validate_menu_command = Some(callback);
+    fn on_validate_app_menu_command(&self, mut callback: Box<dyn FnMut(&dyn Action) -> bool>) {
+        self.on_validate_app_menu_item(Box::new(move |action| MenuItemState {
+            enabled: callback(action),
+            checked: None,
+            title: None,
+        }));
+    }
+
+    fn on_validate_app_menu_item(&self, callback: Box<dyn FnMut(&dyn Action) -> MenuItemState>) {
+        self.0.lock().validate_menu_item = Some(callback);
     }
 
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>) {
@@ -1525,7 +1534,7 @@ extern "C-unwind" fn validate_menu_item(this: &AnyObject, _: Sel, item: *mut Any
         let mut result = false;
         let platform = get_mac_platform(this);
         let mut lock = platform.0.lock();
-        if let Some(mut callback) = lock.validate_menu_command.take() {
+        if let Some(mut callback) = lock.validate_menu_item.take() {
             let tag: NSInteger = if item.is_null() {
                 0
             } else {
@@ -1535,13 +1544,25 @@ extern "C-unwind" fn validate_menu_item(this: &AnyObject, _: Sel, item: *mut Any
             if let Some(action) = lock.menu_actions.get(index) {
                 let action = action.boxed_clone();
                 drop(lock);
-                result = callback(action.as_ref());
+                let state = callback(action.as_ref());
+                if !item.is_null()
+                    && let Some(checked) = state.checked
+                {
+                    let value = if checked {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    };
+                    let _: () = msg_send![item, setState: value];
+                }
+                if !item.is_null()
+                    && let Some(title) = &state.title
+                {
+                    let _: () = msg_send![item, setTitle: ns_string(title)];
+                }
+                result = state.enabled;
             }
-            platform
-                .0
-                .lock()
-                .validate_menu_command
-                .get_or_insert(callback);
+            platform.0.lock().validate_menu_item.get_or_insert(callback);
         }
         result.to_objc()
     }

@@ -5,11 +5,11 @@ use crate::PathPromptOptions;
 use crate::{
     ActivityGuard, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem,
     CursorStyle, DevicePixels, DisplayId, DummyKeyboardMapper, ForegroundExecutor, Keymap,
-    OwnedMenu, Platform, PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, PlatformTextSystem, PromptButton, ScreenCaptureFrame,
-    ScreenCaptureSource, ScreenCaptureStream, SharedString, SourceMetadata, SystemNotification,
-    SystemNotificationResponse, Task, TestDisplay, TestWindow, ThermalState, WindowAppearance,
-    WindowParams, size,
+    MenuItemState, OwnedMenu, Platform, PlatformDisplay, PlatformHeadlessRenderer,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PromptButton,
+    ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream, SharedString, SourceMetadata,
+    SystemNotification, SystemNotificationResponse, Task, TestDisplay, TestWindow, ThermalState,
+    WindowAppearance, WindowParams, size,
 };
 use anyhow::Result;
 #[cfg(any(test, feature = "test-support"))]
@@ -59,6 +59,7 @@ pub(crate) struct TestPlatform {
     menus: RefCell<Vec<OwnedMenu>>,
     pub(crate) app_lifecycle_callback: RefCell<Option<Box<dyn FnMut(AppLifecyclePhase)>>>,
     pub(crate) memory_warning_callback: RefCell<Option<Box<dyn FnMut()>>>,
+    validate_menu_item: RefCell<Option<Box<dyn FnMut(&dyn crate::Action) -> MenuItemState>>>,
 }
 
 #[derive(Clone)]
@@ -258,7 +259,17 @@ impl TestPlatform {
             menus: Default::default(),
             app_lifecycle_callback: Default::default(),
             memory_warning_callback: Default::default(),
+            validate_menu_item: Default::default(),
         })
+    }
+
+    /// Asks the recorded menu item validator for `action`'s state, as the
+    /// platform does when the item's menu opens; `None` before one is recorded.
+    pub(crate) fn validate_menu_item(&self, action: &dyn crate::Action) -> Option<MenuItemState> {
+        let mut callback = self.validate_menu_item.borrow_mut().take()?;
+        let state = callback(action);
+        self.validate_menu_item.borrow_mut().get_or_insert(callback);
+        Some(state)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -759,6 +770,13 @@ impl Platform for TestPlatform {
     fn on_will_open_app_menu(&self, _callback: Box<dyn FnMut()>) {}
 
     fn on_validate_app_menu_command(&self, _callback: Box<dyn FnMut(&dyn crate::Action) -> bool>) {}
+
+    fn on_validate_app_menu_item(
+        &self,
+        callback: Box<dyn FnMut(&dyn crate::Action) -> MenuItemState>,
+    ) {
+        *self.validate_menu_item.borrow_mut() = Some(callback);
+    }
 
     fn app_path(&self) -> Result<std::path::PathBuf> {
         unimplemented!()

@@ -65,6 +65,18 @@ impl OsMenu {
     }
 }
 
+/// The state of an app menu item, asked for each time its menu opens.
+/// See [`App::on_validate_menu_item`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MenuItemState {
+    /// Whether the item can be chosen.
+    pub enabled: bool,
+    /// The item's check mark; `None` leaves the mark it was built with.
+    pub checked: Option<bool>,
+    /// The item's title; `None` leaves the title it was built with.
+    pub title: Option<SharedString>,
+}
+
 /// The type of system menu
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub enum SystemMenuType {
@@ -338,13 +350,13 @@ pub(crate) fn init_app_menus(platform: &dyn Platform, cx: &App) {
         }
     }));
 
-    platform.on_validate_app_menu_command(Box::new({
+    platform.on_validate_app_menu_item(Box::new({
         let cx = cx.to_async();
         move |action| {
             cx.app
                 .upgrade()
-                .map(|app| app.borrow_mut().update(|cx| cx.is_action_available(action)))
-                .unwrap_or(false)
+                .map(|app| app.borrow_mut().update(|cx| cx.validate_menu_item(action)))
+                .unwrap_or_default()
         }
     }));
 
