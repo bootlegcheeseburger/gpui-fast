@@ -973,6 +973,7 @@ impl WaylandWindowStatePtr {
             require_presentation,
             signal_at,
             signal_source,
+            output_host_time_ns: None,
         });
         self.update_ime_enabled();
         drop(callbacks);

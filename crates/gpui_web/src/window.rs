@@ -390,6 +390,7 @@ impl WebWindow {
                         force_render: true,
                         signal_at: None,
                         signal_source: FrameRequestSource::NativeCallback,
+                        output_host_time_ns: None,
                     })
                 },
             );
@@ -463,6 +464,7 @@ impl WebWindowInner {
                         force_render: false,
                         signal_at: None,
                         signal_source: FrameRequestSource::NativeCallback,
+                        output_host_time_ns: None,
                     })
                 },
             );

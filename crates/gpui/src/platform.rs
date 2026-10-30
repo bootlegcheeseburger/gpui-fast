@@ -1083,6 +1083,11 @@ pub struct RequestFrameOptions {
     pub signal_at: Option<Instant>,
     /// Distinguishes native callbacks from local scheduling requests.
     pub signal_source: FrameRequestSource,
+    /// Fork patch: when the display expects this frame on screen, CoreVideo's output time
+    /// for the display-link tick that requested it, in host-clock nanoseconds
+    /// (`mach_absolute_time` scaled by its timebase). Collected without the `profiler` feature.
+    /// `None` when the platform has no output time (other requests, other backends).
+    pub output_host_time_ns: Option<u64>,
 }
 
 /// Preserves the first platform frame request time across coalesced notifications.
@@ -1336,6 +1341,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
     fn draw(&self, scene: &Scene);
+    /// Fork patch: takes the `(output_host_time_ns, presented_host_ns)` pairs of the frames
+    /// presented since the last take (see `Window::take_presented`). None where the platform
+    /// does not report presentation.
+    fn take_presented(&self) -> Vec<(u64, u64)> {
+        Vec::new()
+    }
     fn draw_composed(&self, scene: crate::fast::composition::ComposedScene<'_>) {
         crate::fast::composition::draw_uncomposed(self, scene)
     }

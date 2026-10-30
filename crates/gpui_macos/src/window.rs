@@ -2155,6 +2155,10 @@ impl PlatformWindow for MacWindow {
         this.renderer.draw(scene);
     }
 
+    fn take_presented(&self) -> Vec<(u64, u64)> {
+        self.0.lock().renderer.take_presented()
+    }
+
     fn draw_composed(&self, scene: gpui::ComposedScene<'_>) {
         crate::fast::composition::draw_composed(&self.0, scene)
     }
@@ -3453,13 +3457,24 @@ extern "C" fn step(view: *mut c_void) {
             (None, FrameRequestSource::NativeCallback),
             |(at, source)| (Some(at), source),
         );
+        // Fork patch: the legacy display link's output time for this frame.
+        let output_host_time_ns = match &lock.frame_source {
+            FrameSource::DisplayLink(Some(source)) => source.take_output_host_time_ns(),
+            _ => None,
+        };
+        lock.renderer
+            .set_frame_output_host_time_ns(output_host_time_ns);
         drop(lock);
         callback(RequestFrameOptions {
             signal_at,
             signal_source,
+            output_host_time_ns,
             ..Default::default()
         });
-        window_state.lock().request_frame_callback = Some(callback);
+        let mut lock = window_state.lock();
+        // A tick that drew nothing leaves no time for a later, untimed draw.
+        lock.renderer.set_frame_output_host_time_ns(None);
+        lock.request_frame_callback = Some(callback);
     }
 }
 
@@ -3476,15 +3491,21 @@ fn metal_frame(
     let Some(mut callback) = lock.request_frame_callback.take() else {
         return;
     };
+    // Fork patch: Metal display links report their presentation target on the host clock.
+    let output_host_time_ns = Some((update.targetPresentationTimestamp() * 1e9).round() as u64);
+    lock.renderer
+        .set_frame_output_host_time_ns(output_host_time_ns);
     lock.renderer.set_frame_drawable(Some(update.drawable()));
     drop(lock);
     metal_frames.begin_frame();
     callback(RequestFrameOptions {
         signal_at,
         signal_source: FrameRequestSource::NativeCallback,
+        output_host_time_ns,
         ..Default::default()
     });
     let mut lock = window_state.lock();
+    lock.renderer.set_frame_output_host_time_ns(None);
     lock.request_frame_callback = Some(callback);
     // A frame with nothing to draw leaves its drawable unused; releasing it
     // lets the link hand it out again.

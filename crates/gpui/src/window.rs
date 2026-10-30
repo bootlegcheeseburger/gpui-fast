@@ -1300,6 +1300,9 @@ pub struct Window {
         SingleSubscriberSet<Box<dyn FnMut(WindowVisibility, &mut Window, &mut App) -> bool>>,
     pub(crate) hovered: Rc<Cell<bool>>,
     pub(crate) needs_present: Rc<Cell<bool>>,
+    // Fork patch: the frame being drawn's output host time, and frames presented so far.
+    frame_output_host_time_ns: Option<u64>,
+    presented_frames: u64,
     /// Tracks recent input event timestamps to determine if input is arriving at a high rate.
     /// Used to selectively enable VRR optimization only when input rate exceeds 60fps.
     pub(crate) input_rate_tracker: Rc<RefCell<InputRateTracker>>,
@@ -2053,6 +2056,8 @@ impl Window {
                     measure("frame duration", || {
                         handle
                             .update(&mut cx, |_, window, cx| {
+                                window.frame_output_host_time_ns =
+                                    request_frame_options.output_host_time_ns;
                                 #[cfg(feature = "profiler")]
                                 window
                                     .window_profiler
@@ -2428,6 +2433,8 @@ impl Window {
             visibility_observers: SingleSubscriberSet::new(),
             hovered,
             needs_present,
+            frame_output_host_time_ns: None,
+            presented_frames: 0,
             input_rate_tracker,
             #[cfg(feature = "profiler")]
             window_profiler: profiler::WindowProfiler::new(handle.window_id())?,
@@ -3886,7 +3893,30 @@ impl Window {
             !self.next_frame_callbacks.borrow().is_empty(),
         );
         self.needs_present.set(false);
+        self.presented_frames += 1;
         profiling::finish_frame!();
+    }
+
+    /// Fork patch: when the display expects the frame being drawn on screen, in host-clock
+    /// nanoseconds (`mach_absolute_time` scaled by its timebase): CoreVideo's output time for the
+    /// display-link tick that requested the frame. `None` when the frame was not requested by a
+    /// display-link tick (an activation, a resize, a local schedule) or the platform has none.
+    pub fn frame_output_host_time_ns(&self) -> Option<u64> {
+        self.frame_output_host_time_ns
+    }
+
+    /// Fork patch: how many frames this window has presented. A frame drawn now is presented
+    /// as number `presented_frame_count() + 1`.
+    pub fn presented_frame_count(&self) -> u64 {
+        self.presented_frames
+    }
+
+    /// Fork patch: the frames presented since the last take, oldest first, each as
+    /// `(output_host_time_ns, presented_host_ns)`: the frame's `frame_output_host_time_ns` and
+    /// when it reached the display, both in host-clock nanoseconds. A presented time of 0 is a
+    /// frame the display dropped. Only frames a display-link tick asked for are reported.
+    pub fn take_presented(&mut self) -> Vec<(u64, u64)> {
+        self.platform_window.take_presented()
     }
 
     /// Presents the most recently drawn frame if it hasn't been presented yet.

@@ -68,7 +68,10 @@ use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, btree_map},
     ffi::c_void,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -98,6 +101,7 @@ struct DisplayLinkSubscriber {
     id: SubscriberId,
     frame_requests: DispatchRetained<DispatchSource>,
     signal: Arc<PlatformFrameSignal>,
+    output_host_time_ns: Arc<AtomicU64>,
 }
 
 // SAFETY: Both fields wrapping raw pointers are refcounted handles to
@@ -129,7 +133,7 @@ fn debug_assert_main_thread() {
 unsafe extern "C" fn display_link_output_callback(
     _display_link_out: *mut sys::CVDisplayLink,
     current_time: *const sys::CVTimeStamp,
-    _output_time: *const sys::CVTimeStamp,
+    output_time: *const sys::CVTimeStamp,
     _flags_in: i64,
     _flags_out: *mut i64,
     display_id: *mut c_void,
@@ -148,10 +152,16 @@ unsafe extern "C" fn display_link_output_callback(
             received_at,
         )
     });
+    // Fork patch: the output time, always (not only under the profiler).
+    // SAFETY: CoreVideo owns this timestamp for the lifetime of the callback.
+    let output_host_time_ns = output_host_time_ns(unsafe { output_time.as_ref() });
     let display_id = display_id as usize as CGDirectDisplayID;
     let registry = lock_registry();
     if let Some(entry) = registry.displays.get(&display_id) {
         for subscriber in &entry.subscribers {
+            subscriber
+                .output_host_time_ns
+                .store(output_host_time_ns, Ordering::Release);
             if let Some(signal_at) = signal_at {
                 subscriber
                     .signal
@@ -161,6 +171,41 @@ unsafe extern "C" fn display_link_output_callback(
         }
     }
     0
+}
+
+/// Fork patch: a CoreVideo timestamp's host time in host-clock nanoseconds
+/// (`mach_absolute_time` scaled by its timebase), or 0 when it has none.
+fn output_host_time_ns(timestamp: Option<&sys::CVTimeStamp>) -> u64 {
+    timestamp
+        .filter(|t| t.version == 0 && t.flags & sys::kCVTimeStampHostTimeValid != 0)
+        .map_or(0, |t| host_ticks_to_ns(t.host_time, mach_timebase()))
+}
+
+fn host_ticks_to_ns(ticks: u64, (numer, denom): (u32, u32)) -> u64 {
+    if denom == 0 {
+        return 0;
+    }
+    u64::try_from(u128::from(ticks) * u128::from(numer) / u128::from(denom)).unwrap_or(u64::MAX)
+}
+
+fn mach_timebase() -> (u32, u32) {
+    #[repr(C)]
+    struct MachTimebaseInfo {
+        numer: u32,
+        denom: u32,
+    }
+    unsafe extern "C" {
+        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
+    }
+    static TIMEBASE: OnceLock<(u32, u32)> = OnceLock::new();
+    *TIMEBASE.get_or_init(|| {
+        let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
+        // SAFETY: `info` is a valid out pointer; a failure leaves denom 0, which maps to 0.
+        if unsafe { mach_timebase_info(&mut info) } != 0 {
+            return (0, 0);
+        }
+        (info.numer, info.denom)
+    })
 }
 
 /// Maps a CoreVideo host timestamp using a paired clock sample.
@@ -193,6 +238,7 @@ fn subscribe(
     display_id: CGDirectDisplayID,
     frame_requests: DispatchRetained<DispatchSource>,
     signal: Arc<PlatformFrameSignal>,
+    output_host_time_ns: Arc<AtomicU64>,
 ) -> Result<SubscriberId> {
     debug_assert_main_thread();
 
@@ -235,6 +281,7 @@ fn subscribe(
             id: subscriber_id,
             frame_requests,
             signal,
+            output_host_time_ns,
         });
         let link_to_start = if entry.running {
             None
@@ -349,6 +396,7 @@ pub struct WindowFrameSource {
     frame_requests: DispatchRetained<DispatchSource>,
     registration: Option<(CGDirectDisplayID, SubscriberId)>,
     signal: Arc<PlatformFrameSignal>,
+    output_host_time_ns: Arc<AtomicU64>,
 }
 
 impl WindowFrameSource {
@@ -371,13 +419,18 @@ impl WindowFrameSource {
             frame_requests,
             registration: None,
             signal: Arc::new(PlatformFrameSignal::new()),
+            output_host_time_ns: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn start(&mut self, display_id: CGDirectDisplayID) -> Result<()> {
         self.stop();
-        let subscriber_id =
-            subscribe(display_id, self.frame_requests.clone(), self.signal.clone())?;
+        let subscriber_id = subscribe(
+            display_id,
+            self.frame_requests.clone(),
+            self.signal.clone(),
+            self.output_host_time_ns.clone(),
+        )?;
         self.registration = Some((display_id, subscriber_id));
         Ok(())
     }
@@ -386,11 +439,18 @@ impl WindowFrameSource {
         self.signal.take()
     }
 
+    /// Fork patch: the latest tick's output time in host-clock nanoseconds, taken once.
+    /// Dispatch coalesces ticks, so the latest is the one the coming frame serves.
+    pub fn take_output_host_time_ns(&self) -> Option<u64> {
+        Some(self.output_host_time_ns.swap(0, Ordering::Acquire)).filter(|&ns| ns != 0)
+    }
+
     pub fn stop(&mut self) {
         if let Some((display_id, subscriber_id)) = self.registration.take() {
             unsubscribe(display_id, subscriber_id);
         }
         self.signal.take();
+        self.output_host_time_ns.store(0, Ordering::Release);
     }
 }
 
@@ -678,6 +738,24 @@ mod tests {
                 received_at,
             );
         }
+    }
+
+    #[test]
+    fn output_host_time_scales_ticks_by_the_timebase() {
+        // Apple silicon's 24 MHz host clock (125/3) and Intel's nanosecond one (1/1).
+        assert_eq!(host_ticks_to_ns(24_000_000, (125, 3)), 1_000_000_000);
+        assert_eq!(host_ticks_to_ns(1_234, (1, 1)), 1_234);
+        assert_eq!(host_ticks_to_ns(u64::MAX, (125, 3)), u64::MAX);
+        assert_eq!(host_ticks_to_ns(5, (1, 0)), 0);
+        assert_eq!(output_host_time_ns(None), 0);
+        let mut missing = timestamp(1_000);
+        missing.flags = 0;
+        assert_eq!(output_host_time_ns(Some(&missing)), 0);
+        let (numer, denom) = mach_timebase();
+        assert_eq!(
+            output_host_time_ns(Some(&timestamp(3_000))),
+            3_000 * numer as u64 / denom as u64
+        );
     }
 
     fn timestamp(host_time: u64) -> sys::CVTimeStamp {

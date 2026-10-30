@@ -139,13 +139,15 @@ pub struct MetalRenderer {
     /// For headless rendering, tracks whether output should be opaque
     pub(crate) opaque: bool,
     pub(crate) command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    pub(crate) paths_rasterization_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    pub(crate) paths_rasterization_pipeline_state:
+        Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     path_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     shadows_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     quads_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     underlines_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     monochrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    pub(crate) polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    pub(crate) polychrome_sprites_pipeline_state:
+        Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     pub(crate) unit_vertices: Retained<ProtocolObject<dyn MTLBuffer>>,
     pub(crate) instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
@@ -159,6 +161,35 @@ pub struct MetalRenderer {
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     headless_render_target: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     pub(crate) fast_layers: crate::fast::layers::TileCache,
+    /// Fork patch: the output host time (ns) of the next frame drawn, set by the platform
+    /// window from its display-link tick and taken by that frame's `draw`.
+    frame_output_host_time_ns: Option<u64>,
+    /// Fork patch: `(output_host_time_ns, presented_host_ns)` per presented frame, queued by
+    /// the drawable's presented handler (presented 0: the frame was dropped).
+    presented: Arc<Mutex<Vec<(u64, u64)>>>,
+}
+
+/// Fork patch: the most presented samples kept untaken; older ones are dropped first.
+const PRESENTED_KEEP: usize = 256;
+
+/// Fork patch: a drawable's `presentedTime` (CFTimeInterval seconds on the host clock,
+/// `mach_absolute_time` scaled by its timebase; 0 for a dropped frame) in host-clock nanoseconds.
+fn presented_host_ns(presented_secs: f64) -> u64 {
+    if presented_secs.is_finite() && presented_secs > 0.0 {
+        (presented_secs * 1e9).round() as u64
+    } else {
+        0
+    }
+}
+
+/// Fork patch: queues one presented sample, keeping the newest `PRESENTED_KEEP`.
+fn queue_presented(queue: &Mutex<Vec<(u64, u64)>>, sample: (u64, u64)) {
+    let mut queue = queue.lock();
+    if queue.len() >= PRESENTED_KEEP {
+        let excess = queue.len() + 1 - PRESENTED_KEEP;
+        queue.drain(..excess);
+    }
+    queue.push(sample);
 }
 
 #[repr(C)]
@@ -447,7 +478,21 @@ impl MetalRenderer {
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
             fast_layers: crate::fast::layers::TileCache::default(),
+            frame_output_host_time_ns: None,
+            presented: Arc::default(),
         })
+    }
+
+    /// Fork patch: the output host time (ns) of the next frame `draw` presents; `None` for a
+    /// frame no display-link tick asked for.
+    pub fn set_frame_output_host_time_ns(&mut self, output_host_time_ns: Option<u64>) {
+        self.frame_output_host_time_ns = output_host_time_ns;
+    }
+
+    /// Fork patch: takes the `(output_host_time_ns, presented_host_ns)` pairs queued since
+    /// the last take, oldest first. A presented time of 0 is a dropped frame.
+    pub fn take_presented(&self) -> Vec<(u64, u64)> {
+        mem::take(&mut *self.presented.lock())
     }
 
     pub fn layer(&self) -> Option<&CAMetalLayer> {
@@ -522,7 +567,10 @@ impl MetalRenderer {
         crate::fast::layers::TileCache::clear(&mut self.fast_layers);
     }
 
-    pub(crate) fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) -> Result<()> {
+    pub(crate) fn update_path_intermediate_textures(
+        &mut self,
+        size: Size<DevicePixels>,
+    ) -> Result<()> {
         // We are uncertain when this happens, but sometimes size can be 0 here. Most likely before
         // the layout pass on window creation. Zero-sized texture creation causes SIGABRT.
         // https://github.com/zed-industries/zed/issues/36229
@@ -600,6 +648,7 @@ impl MetalRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
+        let output_host_time_ns = self.frame_output_host_time_ns.take();
         let layer = match &self.layer {
             Some(l) => l.clone(),
             None => {
@@ -643,6 +692,23 @@ impl MetalRenderer {
                 return;
             }
         };
+
+        // Fork patch: when the frame really reached the display, beside its output time.
+        if let Some(output) = output_host_time_ns {
+            let presented = self.presented.clone();
+            let block = RcBlock::new(
+                move |drawable: ptr::NonNull<ProtocolObject<dyn MTLDrawable>>| {
+                    // SAFETY: the handler's argument is the presented MTLDrawable.
+                    let drawable = unsafe { drawable.as_ref() };
+                    let sample = (output, presented_host_ns(drawable.presentedTime()));
+                    queue_presented(&presented, sample);
+                },
+            );
+            // SAFETY: Both pointee types are opaque views of the same Objective-C block pointer ABI.
+            unsafe {
+                drawable.addPresentedHandler(RcBlock::as_ptr(&block).cast_mut());
+            }
+        }
 
         if self.presents_with_transaction {
             command_buffer.commit();
@@ -1711,7 +1777,10 @@ pub(crate) struct InstanceBindings {
     pub(crate) surfaces: InstanceBinding,
 }
 
-pub(crate) fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
+pub(crate) fn write_instances(
+    scene: &Scene,
+    writer: &mut InstanceBufferWriter,
+) -> Result<InstanceBindings> {
     Ok(InstanceBindings {
         quads: writer.write(&scene.quads)?,
         shadows: writer.write(&scene.shadows)?,
@@ -1951,6 +2020,50 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
+    }
+}
+
+/// Fork patch: the presented-time samples.
+#[cfg(test)]
+mod presented_tests {
+    use super::*;
+
+    #[test]
+    fn presented_time_reads_as_host_ns_and_zero_as_dropped() {
+        assert_eq!(presented_host_ns(1.5), 1_500_000_000);
+        assert_eq!(presented_host_ns(12_345.000_000_25), 12_345_000_000_250);
+        assert_eq!(presented_host_ns(0.0), 0);
+        assert_eq!(presented_host_ns(-1.0), 0);
+        assert_eq!(presented_host_ns(f64::NAN), 0);
+    }
+
+    #[test]
+    fn the_queue_keeps_the_newest_samples_in_order() {
+        let queue = Mutex::new(Vec::new());
+        for i in 0..PRESENTED_KEEP as u64 + 10 {
+            queue_presented(&queue, (i, i + 1));
+        }
+        let taken = mem::take(&mut *queue.lock());
+        assert_eq!(taken.len(), PRESENTED_KEEP);
+        assert_eq!(taken.first(), Some(&(10, 11)));
+        assert_eq!(
+            taken.last(),
+            Some(&(PRESENTED_KEEP as u64 + 9, PRESENTED_KEEP as u64 + 10))
+        );
+    }
+
+    #[test]
+    fn an_output_time_is_taken_by_one_draw_only() {
+        if metal::Device::system_default().is_none() {
+            eprintln!("skip: no Metal device");
+            return;
+        }
+        // Headless: the draw has no drawable to present, so nothing is queued either.
+        let mut renderer = MetalRenderer::new_headless(Arc::default());
+        renderer.set_frame_output_host_time_ns(Some(42));
+        renderer.draw(&Scene::default());
+        assert_eq!(renderer.frame_output_host_time_ns, None);
+        assert!(renderer.take_presented().is_empty());
     }
 }
 
