@@ -807,6 +807,7 @@ impl X11Client {
                         force_render: false,
                         signal_at: None,
                         signal_source: FrameRequestSource::NativeCallback,
+                        output_host_time_ns: None,
                     });
                 }
             }
@@ -2106,6 +2107,7 @@ impl X11ClientState {
                                 force_render: false,
                                 signal_at: PlatformFrameSignal::capture(|| instant),
                                 signal_source: FrameRequestSource::LocalSchedule,
+                                output_host_time_ns: None,
                             });
                         }
                         xcb_connection
