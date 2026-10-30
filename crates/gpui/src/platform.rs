@@ -503,6 +503,15 @@ pub trait Platform: 'static {
     fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>);
     fn on_will_open_app_menu(&self, callback: Box<dyn FnMut()>);
     fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>);
+    /// Installs the callback asked for an app menu item's state each time its
+    /// menu opens. Platforms that only enable or disable items keep the default,
+    /// which forwards `enabled` to [`Platform::on_validate_app_menu_command`].
+    fn on_validate_app_menu_item(
+        &self,
+        mut callback: Box<dyn FnMut(&dyn Action) -> MenuItemState>,
+    ) {
+        self.on_validate_app_menu_command(Box::new(move |action| callback(action).enabled));
+    }
 
     fn thermal_state(&self) -> ThermalState;
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>);
@@ -1030,6 +1039,11 @@ pub struct RequestFrameOptions {
     pub signal_at: Option<Instant>,
     /// Distinguishes native callbacks from local scheduling requests.
     pub signal_source: FrameRequestSource,
+    /// Fork patch: when the display expects this frame on screen, CoreVideo's output time
+    /// for the display-link tick that requested it, in host-clock nanoseconds
+    /// (`mach_absolute_time` scaled by its timebase). Collected without the `profiler` feature.
+    /// `None` when the platform has no output time (other requests, other backends).
+    pub output_host_time_ns: Option<u64>,
 }
 
 /// Preserves the first platform frame request time across coalesced notifications.
@@ -1274,6 +1288,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
     fn draw(&self, scene: &Scene);
+    /// Fork patch: takes the `(output_host_time_ns, presented_host_ns)` pairs of the frames
+    /// presented since the last take (see `Window::take_presented`). None where the platform
+    /// does not report presentation.
+    fn take_presented(&self) -> Vec<(u64, u64)> {
+        Vec::new()
+    }
     fn draw_composed(&self, scene: crate::fast::composition::ComposedScene<'_>) {
         crate::fast::composition::draw_uncomposed(self, scene)
     }

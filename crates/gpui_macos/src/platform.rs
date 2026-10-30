@@ -12,8 +12,8 @@ use cocoa::{
         NSApplicationActivationPolicy::{
             NSApplicationActivationPolicyAccessory, NSApplicationActivationPolicyRegular,
         },
-        NSControl as _, NSEventModifierFlags, NSMenu, NSMenuItem, NSVisualEffectState,
-        NSVisualEffectView, NSWindow,
+        NSControl as _, NSEventModifierFlags, NSMenu, NSMenuItem,
+        NSWindow,
     },
     base::{BOOL, NO, YES, id, nil, selector},
     foundation::{
@@ -27,7 +27,7 @@ use futures::channel::oneshot;
 use gpui::{
     Action, ActivationPolicy, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem,
     CursorStyle, ForegroundExecutor, GraphicalEnvironment, KeyContext, Keymap, Menu, MenuItem,
-    OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout,
+    MenuItemState, OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout,
     PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result, SystemMenuType, Task,
     ThermalState, WindowAppearance, WindowKind, WindowParams, WindowingRequest,
     popup::PopupNotSupportedError,
@@ -47,7 +47,7 @@ use objc::{
 };
 use objc2::{MainThreadMarker, runtime::AnyObject};
 use objc2_app_kit::{
-    NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSWorkspace,
+    NSControlStateValueOff, NSControlStateValueOn, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSWorkspace,
     NSWorkspaceDidWakeNotification, NSWorkspaceWillSleepNotification,
 };
 use objc2_foundation::NSActivityOptions;
@@ -196,7 +196,7 @@ pub(crate) struct MacPlatformState {
     system_power_observers_registered: bool,
     quit: Option<Box<dyn FnMut() -> bool>>,
     menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
-    validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
+    validate_menu_item: Option<Box<dyn FnMut(&dyn Action) -> MenuItemState>>,
     will_open_menu: Option<Box<dyn FnMut()>>,
     menu_actions: Vec<Box<dyn Action>>,
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
@@ -259,7 +259,7 @@ impl MacPlatform {
             reopen: None,
             quit: None,
             menu_command: None,
-            validate_menu_command: None,
+            validate_menu_item: None,
             will_open_menu: None,
             menu_actions: Default::default(),
             open_urls: None,
@@ -455,7 +455,7 @@ impl MacPlatform {
                     }
 
                     if *checked {
-                        item.setState_(NSVisualEffectState::Active);
+                        let _: () = msg_send![item, setState: NSControlStateValueOn];
                     }
                     item.setEnabled_(if *disabled { NO } else { YES });
 
@@ -1080,8 +1080,16 @@ impl Platform for MacPlatform {
         self.0.lock().will_open_menu = Some(callback);
     }
 
-    fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>) {
-        self.0.lock().validate_menu_command = Some(callback);
+    fn on_validate_app_menu_command(&self, mut callback: Box<dyn FnMut(&dyn Action) -> bool>) {
+        self.on_validate_app_menu_item(Box::new(move |action| MenuItemState {
+            enabled: callback(action),
+            checked: None,
+            title: None,
+        }));
+    }
+
+    fn on_validate_app_menu_item(&self, callback: Box<dyn FnMut(&dyn Action) -> MenuItemState>) {
+        self.0.lock().validate_menu_item = Some(callback);
     }
 
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>) {
@@ -1519,18 +1527,30 @@ extern "C" fn validate_menu_item(this: &mut Object, _: Sel, item: id) -> bool {
         let mut result = false;
         let platform = get_mac_platform(this);
         let mut lock = platform.0.lock();
-        if let Some(mut callback) = lock.validate_menu_command.take() {
+        if let Some(mut callback) = lock.validate_menu_item.take() {
             let tag: NSInteger = msg_send![item, tag];
             let index = tag as usize;
             if let Some(action) = lock.menu_actions.get(index) {
                 let action = action.boxed_clone();
                 drop(lock);
-                result = callback(action.as_ref());
+                let state = callback(action.as_ref());
+                if let Some(checked) = state.checked {
+                    let value = if checked {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    };
+                    let _: () = msg_send![item, setState: value];
+                }
+                if let Some(title) = &state.title {
+                    let _: () = msg_send![item, setTitle: ns_string(title)];
+                }
+                result = state.enabled;
             }
             platform
                 .0
                 .lock()
-                .validate_menu_command
+                .validate_menu_item
                 .get_or_insert(callback);
         }
         result

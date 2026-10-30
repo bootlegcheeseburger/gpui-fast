@@ -48,7 +48,7 @@ use crate::{
     AnyWindowHandle, AppContext, Arena, ArenaBox, Asset, AssetSource, BackgroundExecutor, Bounds,
     ClipboardItem, ClipboardReadError, CursorStyle, DispatchPhase, DisplayChanges, DisplayEvent,
     DisplayId, EventEmitter, ExternalDragPayload, FocusHandle, FocusMap, ForegroundExecutor,
-    Global, KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu, MenuItem, MissingGlyph,
+    Global, KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu, MenuItem, MenuItemState, MissingGlyph,
     OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformDisplay, PlatformKeyboardLayout,
     PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton, PromptHandle,
     PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation, ScreenCaptureSource,
@@ -861,6 +861,8 @@ pub struct App {
     /// Per-App element arena. This isolates element allocations between different
     /// App instances (important for tests where multiple Apps run concurrently).
     pub(crate) element_arena: RefCell<Arena>,
+    /// The app's menu item validator, `None` for the default.
+    pub(crate) menu_item_validator: Option<Box<dyn FnMut(&dyn Action, &mut App) -> MenuItemState>>,
     /// Per-App event arena.
     pub(crate) event_arena: Arena,
 
@@ -1015,6 +1017,7 @@ impl App {
                 #[cfg(any(test, feature = "test-support", debug_assertions))]
                 name: None,
                 element_arena: RefCell::new(Arena::new(1024 * 1024)),
+                menu_item_validator: None,
                 event_arena: Arena::new(1024 * 1024),
 
                 #[cfg(any(test, gpui_leak_detection))]
@@ -2775,6 +2778,34 @@ impl App {
             || self
                 .global_action_listeners
                 .contains_key(&action.as_any().type_id())
+    }
+
+    /// Sets the validator asked for an app menu item's state each time its menu
+    /// opens: whether it is enabled, its check mark and its title. Without one,
+    /// an item is enabled when [`App::is_action_available`] answers true and keeps
+    /// the check mark and title it was built with.
+    pub fn on_validate_menu_item(
+        &mut self,
+        f: impl FnMut(&dyn Action, &mut App) -> MenuItemState + 'static,
+    ) {
+        self.menu_item_validator = Some(Box::new(f));
+    }
+
+    /// The state of the app menu item for `action`, from the validator set with
+    /// [`App::on_validate_menu_item`] or the default.
+    pub fn validate_menu_item(&mut self, action: &dyn Action) -> MenuItemState {
+        match self.menu_item_validator.take() {
+            Some(mut validator) => {
+                let state = validator(action, self);
+                self.menu_item_validator.get_or_insert(validator);
+                state
+            }
+            None => MenuItemState {
+                enabled: self.is_action_available(action),
+                checked: None,
+                title: None,
+            },
+        }
     }
 
     /// Sets the menu bar for this application. This will replace any existing menu bar.

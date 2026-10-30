@@ -655,7 +655,16 @@ impl TaffyLayoutEngine {
             .retained
             .get_mut(&key)
             .expect("a claimed key is always present");
-        if node.children.as_slice() == children {
+        // The record can be stale: a component takes a step of the key path
+        // but no node, so one key path can name a child of another node on
+        // another frame, and Taffy's `set_children` there moved the child
+        // away without this record knowing. Trust it only while every child
+        // still has this node as its parent.
+        if node.children.as_slice() == children
+            && children
+                .iter()
+                .all(|child| self.taffy.parent((*child).into()) == Some(id.into()))
+        {
             return;
         }
         node.children.clear();

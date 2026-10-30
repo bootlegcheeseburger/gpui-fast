@@ -213,6 +213,12 @@ impl TestAppContext {
         self.test_platform.did_prompt_for_new_path()
     }
 
+    /// Asks the platform's menu item validator for `action`'s state, as the
+    /// platform does when the item's menu opens.
+    pub fn validate_menu_item(&self, action: &dyn crate::Action) -> Option<crate::MenuItemState> {
+        self.test_platform.validate_menu_item(action)
+    }
+
     /// Returns the number of active idle sleep prevention tokens.
     pub fn active_idle_sleep_preventions(&self) -> usize {
         self.test_platform.active_idle_sleep_preventions()

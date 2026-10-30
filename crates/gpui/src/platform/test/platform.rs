@@ -4,7 +4,7 @@ use crate::NoopTextSystem;
 use crate::PathPromptOptions;
 use crate::{
     ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DevicePixels,
-    DisplayId, DummyKeyboardMapper, ForegroundExecutor, Keymap, OwnedMenu, Platform,
+    DisplayId, DummyKeyboardMapper, ForegroundExecutor, Keymap, MenuItemState, OwnedMenu, Platform,
     PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout, PlatformKeyboardMapper,
     PlatformTextSystem, PromptButton, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream,
     SharedString, SourceMetadata, SystemNotification, SystemNotificationResponse, Task,
@@ -55,6 +55,7 @@ pub(crate) struct TestPlatform {
         Option<Box<dyn Fn() -> anyhow::Result<Option<Box<dyn PlatformHeadlessRenderer>>>>>,
     weak: Weak<Self>,
     menus: RefCell<Vec<OwnedMenu>>,
+    validate_menu_item: RefCell<Option<Box<dyn FnMut(&dyn crate::Action) -> MenuItemState>>>,
 }
 
 #[derive(Clone)]
@@ -225,7 +226,17 @@ impl TestPlatform {
             text_system,
             headless_renderer_factory,
             menus: Default::default(),
+            validate_menu_item: Default::default(),
         })
+    }
+
+    /// Asks the recorded menu item validator for `action`'s state, as the
+    /// platform does when the item's menu opens; `None` before one is recorded.
+    pub(crate) fn validate_menu_item(&self, action: &dyn crate::Action) -> Option<MenuItemState> {
+        let mut callback = self.validate_menu_item.borrow_mut().take()?;
+        let state = callback(action);
+        self.validate_menu_item.borrow_mut().get_or_insert(callback);
+        Some(state)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -714,6 +725,13 @@ impl Platform for TestPlatform {
     fn on_will_open_app_menu(&self, _callback: Box<dyn FnMut()>) {}
 
     fn on_validate_app_menu_command(&self, _callback: Box<dyn FnMut(&dyn crate::Action) -> bool>) {}
+
+    fn on_validate_app_menu_item(
+        &self,
+        callback: Box<dyn FnMut(&dyn crate::Action) -> MenuItemState>,
+    ) {
+        *self.validate_menu_item.borrow_mut() = Some(callback);
+    }
 
     fn app_path(&self) -> Result<std::path::PathBuf> {
         unimplemented!()

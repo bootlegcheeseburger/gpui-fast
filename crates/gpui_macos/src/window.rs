@@ -2131,6 +2131,10 @@ impl PlatformWindow for MacWindow {
         this.renderer.draw(scene);
     }
 
+    fn take_presented(&self) -> Vec<(u64, u64)> {
+        self.0.lock().renderer.take_presented()
+    }
+
     fn draw_composed(&self, scene: gpui::ComposedScene<'_>) {
         crate::fast::composition::draw_composed(&self.0, scene)
     }
@@ -3379,13 +3383,24 @@ extern "C" fn step(view: *mut c_void) {
                 (None, FrameRequestSource::NativeCallback),
                 |(at, source)| (Some(at), source),
             );
+        // Fork patch: CoreVideo's output time for the tick, for the frame's display slot.
+        let output_host_time_ns = lock
+            .frame_source
+            .as_ref()
+            .and_then(WindowFrameSource::take_output_host_time_ns);
+        // The frame this tick draws reports when it reached the display beside this time.
+        lock.renderer.set_frame_output_host_time_ns(output_host_time_ns);
         drop(lock);
         callback(RequestFrameOptions {
             signal_at,
             signal_source,
+            output_host_time_ns,
             ..Default::default()
         });
-        window_state.lock().request_frame_callback = Some(callback);
+        let mut lock = window_state.lock();
+        // A tick that drew nothing leaves no time for a later, untimed draw.
+        lock.renderer.set_frame_output_host_time_ns(None);
+        lock.request_frame_callback = Some(callback);
     }
 }
 
