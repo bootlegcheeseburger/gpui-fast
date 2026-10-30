@@ -885,18 +885,25 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
                                  texture2d<float> y_texture
                                  [[texture(SurfaceInputIndex_YTexture)]],
                                  texture2d<float> cb_cr_texture
-                                 [[texture(SurfaceInputIndex_CbCrTexture)]]) {
+                                 [[texture(SurfaceInputIndex_CbCrTexture)]],
+                                 constant float4 *color
+                                 [[buffer(SurfaceInputIndex_Color)]]) {
+  // Fork patch: the matrix and range come from the buffer (SurfaceColor in
+  // metal_renderer.rs), not a fixed BT.601 full-range transform.
   constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
-  const float4x4 ycbcrToRGBTransform =
-      float4x4(float4(+1.0000f, +1.0000f, +1.0000f, +0.0000f),
-               float4(+0.0000f, -0.3441f, +1.7720f, +0.0000f),
-               float4(+1.4020f, -0.7141f, +0.0000f, +0.0000f),
-               float4(-0.7010f, +0.5291f, -0.8860f, +1.0000f));
-  float4 ycbcr = float4(
-      y_texture.sample(texture_sampler, input.texture_position).r,
-      cb_cr_texture.sample(texture_sampler, input.texture_position).rg, 1.0);
-
-  return ycbcrToRGBTransform * ycbcr;
+  float4 coefficients = color[0];
+  float4 range = color[1];
+  float y =
+      (y_texture.sample(texture_sampler, input.texture_position).r - range.x) *
+      range.y;
+  float2 cb_cr =
+      (cb_cr_texture.sample(texture_sampler, input.texture_position).rg -
+       range.z) *
+      range.w;
+  float3 rgb = float3(y + coefficients.x * cb_cr.y,
+                      y - coefficients.y * cb_cr.x - coefficients.z * cb_cr.y,
+                      y + coefficients.w * cb_cr.x);
+  return float4(saturate(rgb), 1.0);
 }
 
 float4 hsla_to_rgba(Hsla hsla) {

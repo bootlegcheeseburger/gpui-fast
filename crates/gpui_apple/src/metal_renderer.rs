@@ -8,12 +8,14 @@ use gpui::{
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
 use objc2::{Message, rc::Retained, runtime::ProtocolObject};
-use objc2_core_foundation::{CFRetained, CGSize};
+use objc2_core_foundation::{CFRetained, CFString, CGSize};
 use objc2_core_graphics::{CGColorSpace, kCGColorSpaceDisplayP3};
 use objc2_core_video::{
-    CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBufferGetHeight,
-    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
-    CVPixelBufferGetWidthOfPlane, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVReturnSuccess,
+    CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBuffer,
+    CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType,
+    CVPixelBufferGetWidth, CVPixelBufferGetWidthOfPlane, kCVImageBufferYCbCrMatrixKey,
+    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVReturnSuccess,
 };
 use objc2_foundation::{NSRange, NSString};
 #[cfg(target_os = "macos")]
@@ -1509,11 +1511,20 @@ impl MetalRenderer {
                 DevicePixels::from(CVPixelBufferGetHeight(image_buffer) as i32),
             );
 
+            // Fork patch: a format other than '420f' or '420v' skips the draw (logged once)
+            // instead of panicking, and the conversion follows the buffer's YCbCr matrix.
             let pixel_format = CVPixelBufferGetPixelFormatType(image_buffer);
-            anyhow::ensure!(
-                pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-                "unsupported surface pixel format: {pixel_format:#x}"
-            );
+            let matrix = surface_ycbcr_matrix(image_buffer);
+            let Some(color) = surface_color(pixel_format, matrix.as_deref()) else {
+                if !UNSUPPORTED_SURFACE_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    log::error!(
+                        "surface(): skipped a pixel buffer of format '{}'; only '420f' and '420v' draw. \
+                         Ask the decoder for NV12 (420f or 420v). Logged once.",
+                        fourcc(pixel_format)
+                    );
+                }
+                continue;
+            };
 
             let plane_texture = |plane, format| -> Result<CFRetained<CVMetalTexture>> {
                 let width = CVPixelBufferGetWidthOfPlane(image_buffer, plane);
@@ -1548,6 +1559,14 @@ impl MetalRenderer {
                 CVMetalTextureGetTexture(&y_texture).context("retrieving luma Metal texture")?;
             let cb_cr_metal_texture = CVMetalTextureGetTexture(&cb_cr_texture)
                 .context("retrieving chroma Metal texture")?;
+            // Fork patch: pass the buffer's conversion matrix to the fragment shader.
+            unsafe {
+                command_encoder.setFragmentBytes_length_atIndex(
+                    ptr::NonNull::from(&color).cast(),
+                    mem::size_of_val(&color),
+                    SurfaceInputIndex::Color as usize,
+                );
+            }
 
             // SAFETY: The size is copied from a live value, and both planes match their shader texture slots.
             // The frame completion handler retains the CoreVideo wrappers until GPU reads finish.
@@ -1969,6 +1988,97 @@ enum SurfaceInputIndex {
     TextureSize = 3,
     YTexture = 4,
     CbCrTexture = 5,
+    // Fork patch: the surface's YCbCr matrix and range (`SurfaceColor`).
+    Color = 6,
+}
+
+// Fork patch: surface() draws '420f' and '420v' with the buffer's
+// YCbCr matrix.
+
+static UNSUPPORTED_SURFACE_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The YCbCr matrices `surface()` honours, from the buffer's `kCVImageBufferYCbCrMatrixKey`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum YCbCrMatrix {
+    Bt601,
+    Bt709,
+    Bt2020,
+}
+
+impl YCbCrMatrix {
+    /// Maps a `kCVImageBufferYCbCrMatrix_*` value; anything absent or unknown is BT.709 (HD).
+    pub(crate) fn from_attachment(value: Option<&str>) -> Self {
+        match value {
+            Some("ITU_R_601_4") => Self::Bt601,
+            Some("ITU_R_2020") => Self::Bt2020,
+            _ => Self::Bt709,
+        }
+    }
+
+    /// (Kr, Kb), the luma weights of red and blue.
+    fn weights(self) -> (f32, f32) {
+        match self {
+            Self::Bt601 => (0.299, 0.114),
+            Self::Bt709 => (0.2126, 0.0722),
+            Self::Bt2020 => (0.2627, 0.0593),
+        }
+    }
+}
+
+/// What the surface fragment shader reads at `SurfaceInputIndex::Color`: two float4s.
+/// With y = (Y - range[0]) * range[1] and cb, cr = (C - range[2]) * range[3]:
+/// R = y + c[0] cr, G = y - c[1] cb - c[2] cr, B = y + c[3] cb.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SurfaceColor {
+    pub(crate) coefficients: [f32; 4],
+    pub(crate) range: [f32; 4],
+}
+
+/// The conversion for a pixel buffer of `pixel_format` whose matrix attachment is `matrix`, or
+/// `None` when `surface()` cannot draw the format.
+#[allow(non_upper_case_globals)]
+pub(crate) fn surface_color(pixel_format: u32, matrix: Option<&str>) -> Option<SurfaceColor> {
+    let range = match pixel_format {
+        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => [0.0, 1.0, 128.0 / 255.0, 1.0],
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => {
+            [16.0 / 255.0, 255.0 / 219.0, 128.0 / 255.0, 255.0 / 224.0]
+        }
+        _ => return None,
+    };
+    let (kr, kb) = YCbCrMatrix::from_attachment(matrix).weights();
+    let kg = 1.0 - kr - kb;
+    Some(SurfaceColor {
+        coefficients: [
+            2.0 * (1.0 - kr),
+            2.0 * kb * (1.0 - kb) / kg,
+            2.0 * kr * (1.0 - kr) / kg,
+            2.0 * (1.0 - kb),
+        ],
+        range,
+    })
+}
+
+fn surface_ycbcr_matrix(buffer: &CVPixelBuffer) -> Option<String> {
+    // SAFETY: the key is CoreVideo's constant, and a null attachment mode is allowed.
+    let value = unsafe { buffer.attachment(kCVImageBufferYCbCrMatrixKey, ptr::null_mut()) }?;
+    value
+        .downcast_ref::<CFString>()
+        .map(|value| value.to_string())
+}
+
+fn fourcc(code: u32) -> String {
+    code.to_be_bytes()
+        .iter()
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '?'
+            }
+        })
+        .collect()
 }
 
 #[repr(C)]
@@ -2020,6 +2130,238 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
+    }
+}
+
+// Fork patch: surface() colour and format handling.
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use gpui::{ScaledPixels, Scene};
+    use objc2_core_foundation::{CFBoolean, CFDictionary, CFType};
+    use objc2_core_video::{
+        CVAttachmentMode, CVPixelBufferCreate, CVPixelBufferGetBaseAddress,
+        CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRow,
+        CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+        CVPixelBufferUnlockBaseAddress, kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+        kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_2020,
+        kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
+        kCVPixelFormatType_32BGRA,
+    };
+
+    const FULL: u32 = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+    const VIDEO: u32 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+
+    fn cf(s: &CFString) -> String {
+        s.to_string()
+    }
+
+    #[test]
+    fn the_matrix_follows_the_attachment_and_defaults_to_bt709() {
+        let cases = [
+            (
+                Some(cf(unsafe { kCVImageBufferYCbCrMatrix_ITU_R_601_4 })),
+                YCbCrMatrix::Bt601,
+            ),
+            (
+                Some(cf(unsafe { kCVImageBufferYCbCrMatrix_ITU_R_709_2 })),
+                YCbCrMatrix::Bt709,
+            ),
+            (
+                Some(cf(unsafe { kCVImageBufferYCbCrMatrix_ITU_R_2020 })),
+                YCbCrMatrix::Bt2020,
+            ),
+            (Some("SMPTE_240M_1995".to_string()), YCbCrMatrix::Bt709),
+            (None, YCbCrMatrix::Bt709),
+        ];
+        for (value, want) in cases {
+            assert_eq!(
+                YCbCrMatrix::from_attachment(value.as_deref()),
+                want,
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_coefficients_are_the_standard_ones() {
+        let close = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3);
+        for (matrix, want) in [
+            ("ITU_R_601_4", [1.402, 0.3441, 0.7141, 1.772]),
+            ("ITU_R_709_2", [1.5748, 0.1873, 0.4681, 1.8556]),
+            ("ITU_R_2020", [1.4746, 0.1646, 0.5714, 1.8814]),
+        ] {
+            let got = surface_color(FULL, Some(matrix)).unwrap().coefficients;
+            assert!(close(got, want), "{matrix}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn the_range_follows_the_pixel_format_and_other_formats_draw_nothing() {
+        assert_eq!(
+            surface_color(FULL, None).unwrap().range,
+            [0.0, 1.0, 128.0 / 255.0, 1.0]
+        );
+        assert_eq!(
+            surface_color(VIDEO, None).unwrap().range,
+            [16.0 / 255.0, 255.0 / 219.0, 128.0 / 255.0, 255.0 / 224.0]
+        );
+        for other in [kCVPixelFormatType_32BGRA, u32::from_be_bytes(*b"x422"), 0] {
+            assert_eq!(surface_color(other, None), None, "{}", fourcc(other));
+        }
+    }
+
+    fn renderer() -> Option<MetalRenderer> {
+        if metal::Device::system_default().is_none() && metal::Device::all().is_empty() {
+            eprintln!("skipped: no Metal device");
+            return None;
+        }
+        Some(MetalRenderer::new_headless(Arc::new(Mutex::new(
+            InstanceBufferPool::default(),
+        ))))
+    }
+
+    /// An 8x8 IOSurface-backed buffer: NV12 planes of one (y, cb, cr), or BGRA.
+    fn buffer(
+        format: u32,
+        ycbcr: (u8, u8, u8),
+        matrix: Option<&'static CFString>,
+    ) -> CFRetained<CVPixelBuffer> {
+        let options = CFDictionary::<CFString, CFType>::from_slices(
+            &[unsafe { kCVPixelBufferIOSurfacePropertiesKey }, unsafe {
+                kCVPixelBufferMetalCompatibilityKey
+            }],
+            &[
+                &**CFDictionary::<CFType, CFType>::empty(),
+                &**CFBoolean::new(true),
+            ],
+        );
+        let mut raw = ptr::null_mut();
+        let status = unsafe {
+            CVPixelBufferCreate(
+                None,
+                8,
+                8,
+                format,
+                Some(options.as_opaque()),
+                ptr::NonNull::from(&mut raw),
+            )
+        };
+        assert_eq!(status, kCVReturnSuccess, "pixel buffer");
+        let buffer = unsafe { CFRetained::from_raw(ptr::NonNull::new(raw).expect("pixel buffer")) };
+        let flags = CVPixelBufferLockFlags::empty();
+        assert_eq!(
+            unsafe { CVPixelBufferLockBaseAddress(&buffer, flags) },
+            kCVReturnSuccess
+        );
+        if format == kCVPixelFormatType_32BGRA {
+            let len = CVPixelBufferGetHeight(&buffer) * CVPixelBufferGetBytesPerRow(&buffer);
+            unsafe { ptr::write_bytes(CVPixelBufferGetBaseAddress(&buffer) as *mut u8, 0xff, len) };
+        }
+        let planes = if format == kCVPixelFormatType_32BGRA {
+            0
+        } else {
+            2
+        };
+        for plane in 0..planes {
+            let rows = CVPixelBufferGetHeightOfPlane(&buffer, plane);
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(&buffer, plane);
+            let base = CVPixelBufferGetBaseAddressOfPlane(&buffer, plane) as *mut u8;
+            let bytes = unsafe { slice::from_raw_parts_mut(base, rows * stride) };
+            for (i, byte) in bytes.iter_mut().enumerate() {
+                *byte = match (plane, i % 2) {
+                    (0, _) => ycbcr.0,
+                    (_, 0) => ycbcr.1,
+                    _ => ycbcr.2,
+                };
+            }
+        }
+        unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
+        if let Some(matrix) = matrix {
+            unsafe {
+                buffer.set_attachment(
+                    kCVImageBufferYCbCrMatrixKey,
+                    matrix,
+                    CVAttachmentMode::ShouldPropagate,
+                )
+            };
+        }
+        buffer
+    }
+
+    /// The centre pixel (RGBA) of `buffer` drawn by surface() into a cleared 8x8 target.
+    fn draw(renderer: &mut MetalRenderer, buffer: CFRetained<CVPixelBuffer>) -> [u8; 4] {
+        let bounds = Bounds {
+            origin: point(ScaledPixels(0.), ScaledPixels(0.)),
+            size: size(ScaledPixels(8.), ScaledPixels(8.)),
+        };
+        let mut scene = Scene::default();
+        scene.insert_primitive(gpui::PaintSurface {
+            order: 0,
+            bounds,
+            content_mask: ContentMask { bounds },
+            image_buffer: buffer,
+        });
+        scene.finish();
+        let image = renderer
+            .render_scene_to_image(&scene, size(DevicePixels(8), DevicePixels(8)))
+            .expect("scene rendered");
+        image.get_pixel(4, 4).0
+    }
+
+    fn near(got: [u8; 4], want: [u8; 3]) -> bool {
+        got[..3].iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 2)
+    }
+
+    #[test]
+    fn video_range_expands_to_full_black_and_white() {
+        let Some(mut renderer) = renderer() else {
+            return;
+        };
+        let white = draw(&mut renderer, buffer(VIDEO, (235, 128, 128), None));
+        let black = draw(&mut renderer, buffer(VIDEO, (16, 128, 128), None));
+        assert!(near(white, [255, 255, 255]), "{white:?}");
+        assert!(near(black, [0, 0, 0]), "{black:?}");
+    }
+
+    #[test]
+    fn the_buffer_matrix_is_honoured_and_bt709_is_the_default() {
+        let Some(mut renderer) = renderer() else {
+            return;
+        };
+        // Y 200, Cr 255: green is 0.784 - Kcr_g * 0.498, 140 under BT.709 and 109 under BT.601.
+        let none = draw(&mut renderer, buffer(FULL, (200, 128, 255), None));
+        let bt601 = draw(
+            &mut renderer,
+            buffer(
+                FULL,
+                (200, 128, 255),
+                Some(unsafe { kCVImageBufferYCbCrMatrix_ITU_R_601_4 }),
+            ),
+        );
+        assert!(none[1].abs_diff(140) <= 2, "{none:?}");
+        assert!(bt601[1].abs_diff(109) <= 2, "{bt601:?}");
+    }
+
+    #[test]
+    fn an_unsupported_format_is_skipped_without_a_panic() {
+        let Some(mut renderer) = renderer() else {
+            return;
+        };
+        // A BGRA buffer used to trip an assert_eq!; now it draws nothing, so the target keeps
+        // its clear colour.
+        let mut empty = Scene::default();
+        empty.finish();
+        let cleared = renderer
+            .render_scene_to_image(&empty, size(DevicePixels(8), DevicePixels(8)))
+            .expect("scene rendered")
+            .get_pixel(4, 4)
+            .0;
+        let pixel = draw(
+            &mut renderer,
+            buffer(kCVPixelFormatType_32BGRA, (0, 0, 0), None),
+        );
+        assert_eq!(pixel, cleared);
     }
 }
 
