@@ -728,6 +728,9 @@ impl LineLayoutIndex {
 /// [`RecentShapes`], and a line found there is copied instead of shaped again.
 #[derive(Default)]
 pub(crate) struct LineShaping {
+    // Fork patch: shares view attribution with this window's layout engine.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) view_work: crate::fast::view_stats::SharedWork,
     /// Lines shaped lately, answered without asking the platform again.
     recent: Mutex<RecentShapes>,
     /// Numbers put together from their glyphs rather than shaped by the
@@ -796,6 +799,18 @@ impl LineShaping {
             .shape(platform_text_system, text, font_size, runs)
             .unwrap_or_else(|| platform_text_system.layout_line(text, font_size, runs));
         self.lines_shaped.fetch_add(1, Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let mut counters = self.view_work.lock();
+            let owner = counters.current;
+            counters.note(
+                owner,
+                crate::fast::view_stats::ViewWork {
+                    lines_shaped: 1,
+                    ..Default::default()
+                },
+            );
+        }
         if let Some(started_at) = started_at {
             self.shape_nanos
                 .fetch_add(started_at.elapsed().as_nanos() as u64, Ordering::Relaxed);

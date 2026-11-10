@@ -37,6 +37,7 @@ pub(crate) mod splice;
 pub(crate) mod stats;
 pub(crate) mod text;
 pub(crate) mod text_style;
+pub(crate) mod view_stats;
 
 #[cfg(test)]
 mod tests;

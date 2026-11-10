@@ -256,6 +256,13 @@ impl Window {
         self.fast_layout.phase_times.reset();
         self.layout_engine.as_mut().unwrap().reset_stats();
         self.text_system().reset_shaping_stats();
+        // Fork patch: the same reset enables and zeroes per-view work.
+        self.text_system()
+            .line_layout_cache
+            .shaping
+            .view_work
+            .lock()
+            .reset();
     }
 
     /// How many layout nodes this window is currently holding on to.

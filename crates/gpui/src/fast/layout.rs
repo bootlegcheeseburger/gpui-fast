@@ -30,7 +30,13 @@ const EXPECT_MESSAGE: &str = "we should avoid taffy layout errors by constructio
 pub(crate) struct LayoutRetention {
     /// Nodes surviving from earlier frames, keyed by their position in the
     /// element tree. `push_layout_key` derives the keys.
-    retained: FxHashMap<u64, RetainedNode>,
+    pub(super) retained: FxHashMap<u64, RetainedNode>,
+    // Fork patch: counters and node owners exist only for test support.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) view_work: Option<crate::fast::view_stats::SharedWork>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) node_work:
+        crate::fast::layout_bounds::LayoutIdMap<crate::fast::view_stats::NodeWork>,
     /// Nodes allocated this frame that are not retained, because the caller had
     /// no key for them or because their key was already claimed. Released at
     /// the end of the frame, which is what used to happen to every node.
@@ -42,7 +48,7 @@ pub(crate) struct LayoutRetention {
     /// window root.
     unstretched_styles: FxHashMap<LayoutId, taffy::style::Style>,
     /// Incremented once per frame; stamped onto nodes as they are claimed.
-    frame: u64,
+    pub(super) frame: u64,
     /// How many retained entries have been claimed so far this frame. When it
     /// matches the size of `retained` at the end of the frame, nothing has been
     /// orphaned and the sweep can be skipped entirely.
@@ -173,7 +179,10 @@ pub(crate) fn settle_measured_leaves(
             continue;
         };
         engine.retention.stats.measure_calls += 1;
-        (context.measure)(
+        crate::fast::view_stats::measure(
+            &engine.retention,
+            node.into(),
+            &mut *context.measure,
             Size {
                 width: Some(content.width),
                 height: Some(content.height),
@@ -216,8 +225,11 @@ fn remove_node(taffy: &mut TaffyTree<NodeContext>, id: LayoutId) {
 /// so keeping nodes across frames is worth nothing on its own: the value comes
 /// from *not writing* to them, which is only possible by remembering what the
 /// previous frame asked for and comparing against it first.
-struct RetainedNode {
-    id: LayoutId,
+pub(super) struct RetainedNode {
+    // Fork patch: dense owner slot survives cached subtree reuse.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) owner: crate::fast::view_stats::ViewSlot,
+    pub(super) id: LayoutId,
     /// Frame in which this node was last claimed. A node that goes a whole
     /// frame unclaimed has left the element tree and is released.
     claimed_in_frame: u64,
@@ -319,6 +331,23 @@ impl MeasureLog {
         !entries.is_empty()
             && entries.iter().all(|(known, available, size)| {
                 stats.measure_calls += 1;
+                #[cfg(any(test, feature = "test-support"))]
+                {
+                    let mut counters = window
+                        .text_system()
+                        .line_layout_cache
+                        .shaping
+                        .view_work
+                        .lock();
+                    let owner = counters.current;
+                    counters.note(
+                        owner,
+                        crate::fast::view_stats::ViewWork {
+                            measure_calls: 1,
+                            ..Default::default()
+                        },
+                    );
+                }
                 measure(*known, *available, window, cx) == *size
             })
     }
@@ -403,6 +432,27 @@ impl TaffyLayoutEngine {
         node.lingers |= retention.list_rows > 0;
         retention.claimed_this_frame += 1;
         retention.stats.nodes_reused += 1;
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            node.owner = retention
+                .view_work
+                .as_ref()
+                .and_then(|work| work.lock().current);
+            if let Some(mut work) = retention.node_work.get(&node.id).copied() {
+                work.owner = node.owner;
+                work.claimed = true;
+                retention.node_work.insert(node.id, work);
+            }
+            if let Some(shared) = &retention.view_work {
+                shared.lock().note(
+                    node.owner,
+                    crate::fast::view_stats::ViewWork {
+                        nodes_reused: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
         if retention.open_key_recordings > 0 {
             retention.claimed_key_log.push(key);
         }
@@ -447,6 +497,16 @@ impl TaffyLayoutEngine {
             {
                 node.claimed_in_frame = frame;
                 retention.claimed_this_frame += 1;
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(shared) = &retention.view_work {
+                    shared.lock().note(
+                        node.owner,
+                        crate::fast::view_stats::ViewWork {
+                            nodes_kept: 1,
+                            ..Default::default()
+                        },
+                    );
+                }
                 if retention.open_key_recordings > 0 {
                     retention.claimed_key_log.push(*key);
                 }
@@ -467,6 +527,16 @@ impl TaffyLayoutEngine {
             if node.claimed_in_frame != frame {
                 node.claimed_in_frame = frame;
                 retention.claimed_this_frame += 1;
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(shared) = &retention.view_work {
+                    shared.lock().note(
+                        node.owner,
+                        crate::fast::view_stats::ViewWork {
+                            nodes_kept: 1,
+                            ..Default::default()
+                        },
+                    );
+                }
             }
             if retention.open_key_recordings > 0 {
                 retention.claimed_key_log.push(*key);
@@ -543,6 +613,11 @@ impl TaffyLayoutEngine {
                 node.claimed_in_frame = frame.wrapping_sub(1);
                 retention.claimed_this_frame -= 1;
                 retention.stats.nodes_reused = retention.stats.nodes_reused.saturating_sub(1);
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(shared) = &retention.view_work {
+                    let mut counters = shared.lock();
+                    counters.unkeep(node.owner);
+                }
             }
         }
     }
@@ -567,6 +642,8 @@ impl TaffyLayoutEngine {
     /// Records a freshly allocated node under `key`, or as transient when there
     /// is no key to record it under.
     fn retain(&mut self, key: Option<u64>, id: LayoutId, measured: bool, style_fingerprint: u64) {
+        #[cfg(any(test, feature = "test-support"))]
+        self.retention.created_work(id);
         let retention = &mut self.retention;
         let Some(key) = key else {
             retention.transient.push(id);
@@ -575,6 +652,8 @@ impl TaffyLayoutEngine {
         retention.retained.insert(
             key,
             RetainedNode {
+                #[cfg(any(test, feature = "test-support"))]
+                owner: retention.work_owner(),
                 id,
                 claimed_in_frame: retention.frame,
                 measured,
@@ -643,6 +722,8 @@ impl TaffyLayoutEngine {
         retention.unstretched_styles.remove(&id);
         retention.stats.style_writes += 1;
         retention.layout_changes += 1;
+        #[cfg(any(test, feature = "test-support"))]
+        retention.dirty_work(id);
         self.taffy
             .set_style(id.into(), style)
             .expect(EXPECT_MESSAGE);
@@ -665,6 +746,8 @@ impl TaffyLayoutEngine {
         }
         retention.stats.children_writes += 1;
         retention.layout_changes += 1;
+        #[cfg(any(test, feature = "test-support"))]
+        retention.dirty_work(id);
         self.set_children(id, children);
     }
 
@@ -678,6 +761,8 @@ impl TaffyLayoutEngine {
                 let parent = LayoutId::from(parent);
                 #[cfg(debug_assertions)]
                 self.report_double_parent(parent, *child);
+                #[cfg(any(test, feature = "test-support"))]
+                self.retention.dirty_work(parent);
                 self.retention.robbed_parents.insert(parent);
             }
         }
@@ -890,6 +975,8 @@ impl TaffyLayoutEngine {
         };
         held.max_size = held.min_size;
         held.box_sizing = taffy::style::BoxSizing::BorderBox;
+        #[cfg(any(test, feature = "test-support"))]
+        self.retention.dirty_work(id);
         self.taffy.set_style(id.into(), held).expect(EXPECT_MESSAGE);
         self.compute_layout(id, available_space, window, cx);
         self.taffy
@@ -924,6 +1011,8 @@ pub(crate) fn release_unclaimed_nodes(engine: &mut TaffyLayoutEngine) {
     // A measured node left clean but not laid out this frame is measured
     // afresh the next time it is.
     for (id, _) in mem::take(&mut engine.retention.pending_replays) {
+        #[cfg(any(test, feature = "test-support"))]
+        engine.retention.dirty_work(id);
         let _ = engine.taffy.mark_dirty(id.into());
     }
     let retention = &mut engine.retention;
@@ -1022,6 +1111,8 @@ pub(crate) fn request_retained_layout(
                 node.measured = false;
                 node.measurement = None;
                 node.measure_log = None;
+                #[cfg(any(test, feature = "test-support"))]
+                engine.retention.dirty_work(id);
                 engine
                     .taffy
                     .set_node_context(id.into(), None)
@@ -1162,7 +1253,11 @@ fn request_measured_node(
     }
     match vouching {
         Some(log) => engine.retention.pending_replays.push((id, log)),
-        None => engine.taffy.mark_dirty(id.into()).expect(EXPECT_MESSAGE),
+        None => {
+            #[cfg(any(test, feature = "test-support"))]
+            engine.retention.dirty_work(id);
+            engine.taffy.mark_dirty(id.into()).expect(EXPECT_MESSAGE);
+        }
     }
     let node = engine
         .retention
@@ -1203,7 +1298,15 @@ pub(crate) fn replay_pending_measures(
         };
         let stands = entries.iter().all(|(known, available, size)| {
             engine.retention.stats.measure_calls += 1;
-            (context.measure)(*known, *available, window, cx) == *size
+            crate::fast::view_stats::measure(
+                &engine.retention,
+                *id,
+                &mut *context.measure,
+                *known,
+                *available,
+                window,
+                cx,
+            ) == *size
         });
         if stands {
             engine.retention.stats.measurements_replayed += 1;
@@ -1218,6 +1321,8 @@ pub(crate) fn replay_pending_measures(
             }
         } else {
             engine.retention.layout_changes += 1;
+            #[cfg(any(test, feature = "test-support"))]
+            engine.retention.dirty_work(*id);
             engine.taffy.mark_dirty((*id).into()).expect(EXPECT_MESSAGE);
         }
     }
@@ -1280,6 +1385,8 @@ pub(crate) fn stretch_retained_auto_size_to_fill(
     }
     if engine.taffy.style(id.into()).expect(EXPECT_MESSAGE) != &style {
         retention.stats.style_writes += 1;
+        #[cfg(any(test, feature = "test-support"))]
+        retention.dirty_work(id);
         engine
             .taffy
             .set_style(id.into(), style)

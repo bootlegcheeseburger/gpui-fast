@@ -21,4 +21,5 @@ mod splice;
 mod support;
 mod text;
 mod text_shaping;
+mod view_stats;
 mod wheel_notifies;

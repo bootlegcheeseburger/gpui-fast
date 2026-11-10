@@ -5460,10 +5460,7 @@ impl Window {
         id: EntityId,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        self.rendered_entity_stack.push(id);
-        let result = f(self);
-        self.rendered_entity_stack.pop();
-        result
+        crate::fast::view_stats::with_rendered_view(self, id, f)
     }
 
     /// Executes the provided function with the specified image cache.
