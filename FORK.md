@@ -26,6 +26,8 @@ git switch -c shop/vNEW shop/vOLD
 git rebase --onto vNEW vOLD
 ```
 
+`blc.toml` sets the shop's push check to the fork's own checks (the fast tests, `menu_item_state`, `gpui_platform`), not upstream's whole workspace, whose formatting and unrelated test failures are upstream's (person, 2026-11-10).
+
 Use the newest `vX.Y.Z` tag (`git tag --sort=-v:refname -l 'v*' | head -1`). After the rebase: `cargo test -p gpui --test menu_item_state`, `cargo check -p gpui_platform` on macOS, then bump the shop kit's pin. Drop a patch when upstream ships the same fix, and say so in the table.
 
 Pushing branches, opening pull requests upstream and changing the GitHub repo belong to the person.
