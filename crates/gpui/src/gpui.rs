@@ -138,6 +138,8 @@ pub use fast::layers::scene::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use fast::stats::LayoutStats;
+#[cfg(any(test, feature = "test-support"))]
+pub use fast::view_stats::ViewWork;
 pub use geometry::*;
 pub use gestures::*;
 pub use global::*;

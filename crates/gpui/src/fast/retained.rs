@@ -1687,6 +1687,13 @@ impl<V: View> ViewElement<V> {
                             self.cached_style.as_ref(),
                             layout.as_ref().and_then(|layout| layout.parent_layout_key),
                         );
+                        #[cfg(any(test, feature = "test-support"))]
+                        if let Some(layout) = &layout {
+                            crate::fast::view_stats::cached_wrapper_kept(
+                                window.layout_engine.as_mut().unwrap(),
+                                &layout.keys,
+                            );
+                        }
                         let index = window.reuse_retained_prepaint(previous, false, cx);
                         // Cached paint can survive a changed element path, but
                         // its style node was requested again at the new path.

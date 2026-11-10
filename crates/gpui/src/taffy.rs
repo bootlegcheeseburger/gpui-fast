@@ -249,7 +249,10 @@ impl TaffyLayoutEngine {
                                 untransform(available_space.height),
                             );
 
-                            let measured_size: Size<Pixels> = (node_context.measure)(
+                            let measured_size: Size<Pixels> = crate::fast::view_stats::measure(
+                                &self.retention,
+                                _id.into(),
+                                &mut *node_context.measure,
                                 known_dimensions,
                                 available_space,
                                 window,

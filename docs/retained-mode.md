@@ -261,3 +261,47 @@ A headless benchmark of 60 panel views × 64 labels is in
 ```sh
 cargo test -p gpui --lib --release retained_bench -- --ignored --nocapture
 ```
+
+### Per-view work (shop fork patch)
+
+With `test-support`, `ViewWork` and `Window::view_stats(EntityId)` report
+work owned by one view. `view_stats_all()` returns `(EntityId, ViewWork)`
+pairs for all views seen in the window, including idle views with zero work.
+`note_view_work(EntityId, ViewWork)` adds work from another renderer. The
+existing `reset_layout_stats()` call enables collection and clears these
+counters too; before the first reset they report zero. Counts accumulate
+until the next reset, rather than being cleared each frame.
+
+`nodes_created` counts new layout nodes; `nodes_reused` counts existing nodes
+claimed by rebuilt elements. `built()` is their sum. `nodes_kept` counts
+retained nodes whose elements were not rebuilt, including an unchanged
+cached view's style wrapper, and does not contribute to `built()`. A cached
+view reused while its parent rebuilds therefore reports zero built nodes.
+`measure_calls` includes solver measurements, measurement replay and final
+width settling. `lines_shaped` counts cache misses as `LayoutStats` does.
+`nodes_dirtied` counts direct changes to existing nodes, at most once per
+node per frame; new nodes contribute only to `nodes_created`. `laid()` is
+`nodes_created + nodes_dirtied`, not the number of solver visits or implicit
+ancestor invalidations. Measurement and shaping belong to the measured
+node's view even when a parent view initiates layout. Nested retained views
+keep their original ownership.
+
+The implementation is `fast/view_stats.rs`. Each window resolves EntityId
+into a dense counter slot at view boundaries. Retained nodes carry that
+slot, with a generation-checked layout-id table for measurement and dirty
+attribution. Slots remain valid for the window's lifetime, including across
+resets and entity-id generation changes. Tables may grow when new views or
+node slots appear; counting steady frames allocates nothing per node. The
+state and public API are compiled out without `test-support` (or tests).
+The only upstream hooks forward the view scope and measurement call and
+export `ViewWork`, alongside `LayoutStats`.
+
+`fast/tests/view_stats.rs` covers idle cached views, a planted whole-window
+refresh, leaf ownership, reset and external work. Its deterministic work
+budget compares 60 and 240 views with 64 nodes each, and its calling-thread
+allocation budget allows zero allocations after warmup.
+The tests were also run with deliberate faults in a disposable copy: treating
+a cached wrapper as built failed with 1 built node, dropping build counts
+failed the refresh assertion, nonlinear slot work failed the scale ratio,
+and one allocation per node failed with 3,840 allocations against a zero
+budget. Dropped build and external work counts failed their attribution tests too.
