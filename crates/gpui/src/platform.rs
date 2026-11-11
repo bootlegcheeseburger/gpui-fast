@@ -1347,6 +1347,15 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn take_presented(&self) -> Vec<(u64, u64)> {
         Vec::new()
     }
+    fn set_frame_token(&self, _fast_token: u64) {
+        crate::fast::presentation::ignore_frame_token()
+    }
+    fn drain_presented_frames(
+        &self,
+        fast_output: &mut Vec<crate::fast::presentation::PresentedFrame>,
+    ) {
+        crate::fast::presentation::drain_frames_unreported(self, fast_output)
+    }
     fn drain_presented(&self, fast_output: &mut Vec<(u64, u64)>) {
         crate::fast::presentation::drain_unreported(self, fast_output)
     }

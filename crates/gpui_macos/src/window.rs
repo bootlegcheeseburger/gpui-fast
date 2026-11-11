@@ -2159,6 +2159,14 @@ impl PlatformWindow for MacWindow {
         self.0.lock().renderer.take_presented()
     }
 
+    fn set_frame_token(&self, fast_token: u64) {
+        crate::fast::presentation::set_frame_token(&self.0, fast_token)
+    }
+
+    fn drain_presented_frames(&self, fast_output: &mut Vec<gpui::PresentedFrame>) {
+        crate::fast::presentation::drain_presented_frames(&self.0, fast_output)
+    }
+
     fn drain_presented(&self, fast_output: &mut Vec<(u64, u64)>) {
         crate::fast::presentation::drain_presented(&self.0, fast_output)
     }

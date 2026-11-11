@@ -169,6 +169,8 @@ pub use util::{FutureExt, Timeout};
 pub use view::*;
 pub use window::*;
 
+pub use fast::presentation::PresentedFrame;
+
 #[cfg(not(target_family = "wasm"))]
 pub use pollster::block_on;
 

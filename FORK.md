@@ -12,7 +12,8 @@ Remotes: `origin` is github.com/bootlegcheeseburger/gpui-fast; `upstream` is git
 | 61b2051 | Presented-frame timing: the display link's output time travels with the frame request, and `Window::take_presented` reports when each frame reached the display. | maybe; a new public API with cross-platform stubs |
 | d687771 | `surface()` draws `420f` and `420v` buffers with the buffer's YCbCr matrix, and skips other formats with a one-time log instead of panicking. | yes, bug-fix shaped, Apple crate only |
 | 67f66a9 | File drags set the input modality to mouse, so a drop after keyboard input still reaches `on_drop`. | yes, small bug fix |
-| receipt-drain | `gpui: Drain presentation receipts into reusable buffers`: `Window::drain_presented` appends receipts while keeping the callback queue and caller buffer allocations. | yes, tested at queue capacity |
+| 3cf1513 | `gpui: Drain presentation receipts into reusable buffers`: `Window::drain_presented` appends receipts while keeping the callback queue and caller buffer allocations. | yes, tested at queue capacity |
+| frame-token | `gpui: Echo caller frame tokens in presentation receipts`: `Window::set_frame_token` binds an optional caller token to the next draw; `drain_presented_frames` returns `PresentedFrame` receipts without changing timestamp-only readers. | maybe, a compatible public extension |
 | 5b80865 | `gpui: Count layout work per view (test-support)`: dense view slots attribute created, claim-reused, kept, measured, shaped and dirtied work. | maybe, a new test-support API |
 
 The named rows identify commits by subject. The hashes are the series on `shop/v0.1.14`; a rebase gives new hashes, and the table names each patch's hash on the newest branch. Planned: an input dispatch observer for the shop kit's input diagnostics More than about two new patches goes back to the person first (shop ruling, 2026-10-30).

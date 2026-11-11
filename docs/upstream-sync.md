@@ -246,7 +246,12 @@ No application-specific timeline policy belongs here.
 The shop presentation extension also offers `Window::drain_presented`, which
 appends timestamp pairs to caller-owned storage. The Metal callback queue keeps
 its capacity across drains; both sides reuse their allocations after warm-up.
-Its implementation and regression tests live in `fast::presentation`.
+Its implementation and regression tests live in `fast::presentation`. `Window::set_frame_token`
+assigns a `u64` token to the next draw, including an untimed or skipped draw.
+`Window::drain_presented_frames` appends `PresentedFrame` values containing the
+optional token and both timestamps. All readers consume one queue; the older
+pair readers keep their signatures. The token is latched into the drawable's
+callback so repeated targets and reordered callbacks retain the correct identity.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what

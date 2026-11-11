@@ -165,33 +165,25 @@ pub struct MetalRenderer {
     pub(crate) fast_layers: crate::fast::layers::TileCache,
     /// Fork patch: the output host time (ns) of the next frame drawn, set by the platform
     /// window from its display-link tick and taken by that frame's `draw`.
-    frame_output_host_time_ns: Option<u64>,
+    pub(crate) frame_output_host_time_ns: Option<u64>,
     /// Fork patch: `(output_host_time_ns, presented_host_ns)` per presented frame, queued by
     /// the drawable's presented handler (presented 0: the frame was dropped).
-    pub(crate) presented: Arc<Mutex<Vec<(u64, u64)>>>,
+    pub(crate) presented: crate::fast::presentation::ReceiptQueue,
+    pub(crate) fast_frame_token: crate::fast::presentation::FrameToken,
 }
 
 /// Fork patch: the most presented samples kept untaken; older ones are dropped first.
-const PRESENTED_KEEP: usize = 256;
+const PRESENTED_KEEP: usize = crate::fast::presentation::PRESENTED_KEEP;
 
 /// Fork patch: a drawable's `presentedTime` (CFTimeInterval seconds on the host clock,
 /// `mach_absolute_time` scaled by its timebase; 0 for a dropped frame) in host-clock nanoseconds.
 fn presented_host_ns(presented_secs: f64) -> u64 {
-    if presented_secs.is_finite() && presented_secs > 0.0 {
-        (presented_secs * 1e9).round() as u64
-    } else {
-        0
-    }
+    crate::fast::presentation::presented_host_ns(presented_secs)
 }
 
 /// Fork patch: queues one presented sample, keeping the newest `PRESENTED_KEEP`.
-fn queue_presented(queue: &Mutex<Vec<(u64, u64)>>, sample: (u64, u64)) {
-    let mut queue = queue.lock();
-    if queue.len() >= PRESENTED_KEEP {
-        let excess = queue.len() + 1 - PRESENTED_KEEP;
-        queue.drain(..excess);
-    }
-    queue.push(sample);
+fn queue_presented(queue: &crate::fast::presentation::ReceiptQueue, sample: (u64, u64)) {
+    crate::fast::presentation::queue_legacy(queue, sample);
 }
 
 #[repr(C)]
@@ -482,6 +474,7 @@ impl MetalRenderer {
             fast_layers: crate::fast::layers::TileCache::default(),
             frame_output_host_time_ns: None,
             presented: Arc::default(),
+            fast_frame_token: crate::fast::presentation::FrameToken::default(),
         })
     }
 
@@ -494,7 +487,7 @@ impl MetalRenderer {
     /// Fork patch: takes the `(output_host_time_ns, presented_host_ns)` pairs queued since
     /// the last take, oldest first. A presented time of 0 is a dropped frame.
     pub fn take_presented(&self) -> Vec<(u64, u64)> {
-        mem::take(&mut *self.presented.lock())
+        crate::fast::presentation::take_legacy(self)
     }
 
     pub fn layer(&self) -> Option<&CAMetalLayer> {
@@ -650,7 +643,7 @@ impl MetalRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
-        let output_host_time_ns = self.frame_output_host_time_ns.take();
+        let fast_receipt = crate::fast::presentation::begin_draw(self);
         let layer = match &self.layer {
             Some(l) => l.clone(),
             None => {
@@ -695,22 +688,7 @@ impl MetalRenderer {
             }
         };
 
-        // Fork patch: when the frame really reached the display, beside its output time.
-        if let Some(output) = output_host_time_ns {
-            let presented = self.presented.clone();
-            let block = RcBlock::new(
-                move |drawable: ptr::NonNull<ProtocolObject<dyn MTLDrawable>>| {
-                    // SAFETY: the handler's argument is the presented MTLDrawable.
-                    let drawable = unsafe { drawable.as_ref() };
-                    let sample = (output, presented_host_ns(drawable.presentedTime()));
-                    queue_presented(&presented, sample);
-                },
-            );
-            // SAFETY: Both pointee types are opaque views of the same Objective-C block pointer ABI.
-            unsafe {
-                drawable.addPresentedHandler(RcBlock::as_ptr(&block));
-            }
-        }
+        crate::fast::presentation::track_drawable(fast_receipt, &self.presented, &drawable);
 
         if self.presents_with_transaction {
             command_buffer.commit();
@@ -2382,16 +2360,23 @@ mod presented_tests {
 
     #[test]
     fn the_queue_keeps_the_newest_samples_in_order() {
-        let queue = Mutex::new(Vec::new());
+        let queue = Arc::default();
         for i in 0..PRESENTED_KEEP as u64 + 10 {
             queue_presented(&queue, (i, i + 1));
         }
         let taken = mem::take(&mut *queue.lock());
         assert_eq!(taken.len(), PRESENTED_KEEP);
-        assert_eq!(taken.first(), Some(&(10, 11)));
         assert_eq!(
-            taken.last(),
-            Some(&(PRESENTED_KEEP as u64 + 9, PRESENTED_KEEP as u64 + 10))
+            taken
+                .first()
+                .map(|frame| (frame.output_host_time_ns, frame.presented_host_ns)),
+            Some((10, 11))
+        );
+        assert_eq!(
+            taken
+                .last()
+                .map(|frame| (frame.output_host_time_ns, frame.presented_host_ns)),
+            Some((PRESENTED_KEEP as u64 + 9, PRESENTED_KEEP as u64 + 10))
         );
     }
 
