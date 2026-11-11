@@ -173,15 +173,18 @@ pub struct MetalRenderer {
 }
 
 /// Fork patch: the most presented samples kept untaken; older ones are dropped first.
+#[cfg(test)]
 const PRESENTED_KEEP: usize = crate::fast::presentation::PRESENTED_KEEP;
 
 /// Fork patch: a drawable's `presentedTime` (CFTimeInterval seconds on the host clock,
 /// `mach_absolute_time` scaled by its timebase; 0 for a dropped frame) in host-clock nanoseconds.
+#[cfg(test)]
 fn presented_host_ns(presented_secs: f64) -> u64 {
     crate::fast::presentation::presented_host_ns(presented_secs)
 }
 
 /// Fork patch: queues one presented sample, keeping the newest `PRESENTED_KEEP`.
+#[cfg(test)]
 fn queue_presented(queue: &crate::fast::presentation::ReceiptQueue, sample: (u64, u64)) {
     crate::fast::presentation::queue_legacy(queue, sample);
 }

@@ -42,6 +42,13 @@ unsafe impl GlobalAlloc for TestAllocator {
     }
 }
 
+// Fork patch: share the calling-thread allocation budget with dispatch regression tests.
+pub(super) fn allocations(f: impl FnOnce()) -> usize {
+    ALLOCATIONS.with(|count| assert!(count.replace(Some(0)).is_none()));
+    f();
+    ALLOCATIONS.with(|count| count.replace(None).unwrap())
+}
+
 struct Panel {
     label: String,
 }

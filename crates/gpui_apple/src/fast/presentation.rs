@@ -49,11 +49,7 @@ fn record_presented(frame: PendingFrame, queue: &ReceiptQueue, seconds: f64) {
         PresentedFrame {
             frame_token: frame.token,
             output_host_time_ns: frame.target,
-            presented_host_ns: if seconds.is_finite() && seconds > 0.0 {
-                (seconds * 1e9).round() as u64
-            } else {
-                0
-            },
+            presented_host_ns: presented_host_ns(seconds),
         },
     );
 }
@@ -91,6 +87,7 @@ fn push_receipt(queue: &ReceiptQueue, receipt: PresentedFrame) {
     queue.push(receipt);
 }
 
+#[cfg(test)]
 pub(crate) fn queue_legacy(queue: &ReceiptQueue, sample: (u64, u64)) {
     push_receipt(
         queue,

@@ -252,6 +252,14 @@ assigns a `u64` token to the next draw, including an untimed or skipped draw.
 optional token and both timestamps. All readers consume one queue; the older
 pair readers keep their signatures. The token is latched into the drawable's
 callback so repeated targets and reordered callbacks retain the correct identity.
+The receipt conversion tests call the same helper as the drawable callback.
+
+The shop action extension adds `App::on_action_in_window`, whose callback receives
+`(&A, Option<&mut Window>, &mut App)` from the existing global bubbling phase.
+Window dispatch lends its own window; genuine windowless dispatch passes `None`.
+It shares registration order, propagation and availability with `App::on_action`
+and adds no per-dispatch allocation. Its adapter and tests live in
+`fast::global_actions` and `fast::tests::global_actions`.
 
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what

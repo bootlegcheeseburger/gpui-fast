@@ -904,7 +904,7 @@ pub struct App {
     pub(crate) keyboard_layout: Box<dyn PlatformKeyboardLayout>,
     pub(crate) keyboard_mapper: Rc<dyn PlatformKeyboardMapper>,
     pub(crate) global_action_listeners:
-        TypeIdHashMap<Vec<Rc<dyn Fn(&dyn Any, DispatchPhase, &mut Self)>>>,
+        TypeIdHashMap<Vec<Rc<crate::fast::global_actions::Listener>>>,
     pending_effects: VecDeque<Effect>,
 
     pub(crate) observers: SubscriberSet<EntityId, Handler>,
@@ -2767,16 +2767,7 @@ impl App {
         &mut self,
         listener: impl Fn(&A, &mut Self) + 'static,
     ) -> &mut Self {
-        self.global_action_listeners
-            .entry(TypeId::of::<A>())
-            .or_default()
-            .push(Rc::new(move |action, phase, cx| {
-                if phase == DispatchPhase::Bubble {
-                    let action = action.downcast_ref().unwrap();
-                    listener(action, cx)
-                }
-            }));
-        self
+        crate::fast::global_actions::on_action(self, listener)
     }
 
     /// Event handlers propagate events by default. Call this method to stop dispatching to
@@ -3002,7 +2993,13 @@ impl App {
             .remove(&action.as_any().type_id())
         {
             for listener in &global_listeners {
-                listener(action.as_any(), DispatchPhase::Capture, self);
+                crate::fast::global_actions::call(
+                    listener,
+                    action,
+                    DispatchPhase::Capture,
+                    None,
+                    self,
+                );
                 if !self.propagate_event {
                     break;
                 }
@@ -3024,7 +3021,13 @@ impl App {
                 .remove(&action.as_any().type_id())
         {
             for listener in global_listeners.iter().rev() {
-                listener(action.as_any(), DispatchPhase::Bubble, self);
+                crate::fast::global_actions::call(
+                    listener,
+                    action,
+                    DispatchPhase::Bubble,
+                    None,
+                    self,
+                );
                 if !self.propagate_event {
                     break;
                 }

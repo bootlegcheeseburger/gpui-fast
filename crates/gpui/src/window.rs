@@ -6876,7 +6876,7 @@ impl Window {
         }
     }
 
-    fn dispatch_action_on_node_inner(
+    pub(crate) fn dispatch_action_on_node_inner(
         &mut self,
         node_id: DispatchNodeId,
         action: &dyn Action,
@@ -6893,7 +6893,13 @@ impl Window {
             for listener in &global_listeners {
                 #[cfg(feature = "profiler")]
                 self.window_profiler.begin_action_handler(action, cx);
-                listener(action.as_any(), DispatchPhase::Capture, cx);
+                crate::fast::global_actions::call(
+                    listener,
+                    action,
+                    DispatchPhase::Capture,
+                    Some(self),
+                    cx,
+                );
                 #[cfg(feature = "profiler")]
                 self.window_profiler.end_action_handler();
                 if !cx.propagate_event {
@@ -6972,7 +6978,13 @@ impl Window {
 
                 #[cfg(feature = "profiler")]
                 self.window_profiler.begin_action_handler(action, cx);
-                listener(action.as_any(), DispatchPhase::Bubble, cx);
+                crate::fast::global_actions::call(
+                    listener,
+                    action,
+                    DispatchPhase::Bubble,
+                    Some(self),
+                    cx,
+                );
                 #[cfg(feature = "profiler")]
                 self.window_profiler.end_action_handler();
                 if !cx.propagate_event {
