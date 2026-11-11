@@ -168,7 +168,7 @@ pub struct MetalRenderer {
     frame_output_host_time_ns: Option<u64>,
     /// Fork patch: `(output_host_time_ns, presented_host_ns)` per presented frame, queued by
     /// the drawable's presented handler (presented 0: the frame was dropped).
-    presented: Arc<Mutex<Vec<(u64, u64)>>>,
+    pub(crate) presented: Arc<Mutex<Vec<(u64, u64)>>>,
 }
 
 /// Fork patch: the most presented samples kept untaken; older ones are dropped first.
@@ -708,7 +708,7 @@ impl MetalRenderer {
             );
             // SAFETY: Both pointee types are opaque views of the same Objective-C block pointer ABI.
             unsafe {
-                drawable.addPresentedHandler(RcBlock::as_ptr(&block).cast_mut());
+                drawable.addPresentedHandler(RcBlock::as_ptr(&block));
             }
         }
 
@@ -2212,13 +2212,14 @@ mod surface_tests {
     }
 
     fn renderer() -> Option<MetalRenderer> {
-        if metal::Device::system_default().is_none() && metal::Device::all().is_empty() {
+        if MTLCreateSystemDefaultDevice().is_none() {
             eprintln!("skipped: no Metal device");
             return None;
         }
-        Some(MetalRenderer::new_headless(Arc::new(Mutex::new(
-            InstanceBufferPool::default(),
-        ))))
+        Some(
+            MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())))
+                .expect("headless renderer"),
+        )
     }
 
     /// An 8x8 IOSurface-backed buffer: NV12 planes of one (y, cb, cr), or BGRA.
@@ -2396,12 +2397,12 @@ mod presented_tests {
 
     #[test]
     fn an_output_time_is_taken_by_one_draw_only() {
-        if metal::Device::system_default().is_none() {
+        if MTLCreateSystemDefaultDevice().is_none() {
             eprintln!("skip: no Metal device");
             return;
         }
         // Headless: the draw has no drawable to present, so nothing is queued either.
-        let mut renderer = MetalRenderer::new_headless(Arc::default());
+        let mut renderer = MetalRenderer::new_headless(Arc::default()).expect("headless renderer");
         renderer.set_frame_output_host_time_ns(Some(42));
         renderer.draw(&Scene::default());
         assert_eq!(renderer.frame_output_host_time_ns, None);

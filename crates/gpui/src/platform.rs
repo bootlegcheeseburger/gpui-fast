@@ -1347,6 +1347,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn take_presented(&self) -> Vec<(u64, u64)> {
         Vec::new()
     }
+    fn drain_presented(&self, fast_output: &mut Vec<(u64, u64)>) {
+        crate::fast::presentation::drain_unreported(self, fast_output)
+    }
     fn draw_composed(&self, scene: crate::fast::composition::ComposedScene<'_>) {
         crate::fast::composition::draw_uncomposed(self, scene)
     }

@@ -2,8 +2,8 @@
 
 use crate::{
     AppContext as _, Context, Entity, EntityId, IntoElement, ParentElement as _, Render, Style,
-    StyleRefinement, Styled as _, TaffyLayoutEngine, TestAppContext, ViewWork, Window, div,
-    fast::view_stats::ViewCounters, px,
+    StyleRefinement, Styled as _, TestAppContext, ViewWork, Window, div,
+    fast::view_stats::ViewCounters, px, taffy::TaffyLayoutEngine,
 };
 use std::{
     alloc::{GlobalAlloc, Layout, System},

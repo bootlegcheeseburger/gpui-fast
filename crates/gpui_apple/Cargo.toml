@@ -58,6 +58,7 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLCommandQueue",
     "MTLDevice",
     "MTLDrawable",
+    "objc2-core-foundation",
     "MTLLibrary",
     "MTLPixelFormat",
     "MTLRenderCommandEncoder",

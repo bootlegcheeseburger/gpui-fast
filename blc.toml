@@ -2,4 +2,4 @@
 # not upstream's whole workspace, whose formatting and unrelated test failures
 # are upstream's (person, 2026-11-10).
 [check]
-cmd = "cargo test -p gpui --features test-support --lib fast:: && cargo test -p gpui --features test-support --test menu_item_state && cargo check -p gpui_platform"
+cmd = "cargo test -p gpui --features test-support --lib fast:: && cargo test -p gpui --features test-support --test menu_item_state && cargo test -p gpui_apple --features test-support --lib fast::presentation:: && cargo test -p gpui_apple --features test-support --lib presented_tests && cargo test -p gpui_apple --features test-support --lib surface_tests && cargo check -p gpui_platform"

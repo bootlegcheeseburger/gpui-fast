@@ -3,7 +3,7 @@
 use crate::{App, AvailableSpace, EntityId, Pixels, Size, Window, taffy::MeasureFn};
 
 #[cfg(any(test, feature = "test-support"))]
-use crate::{LayoutId, TaffyLayoutEngine, fast::layout::LayoutRetention};
+use crate::{LayoutId, fast::layout::LayoutRetention, taffy::TaffyLayoutEngine};
 #[cfg(any(test, feature = "test-support"))]
 use collections::FxHashMap;
 #[cfg(any(test, feature = "test-support"))]

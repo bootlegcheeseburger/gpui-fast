@@ -243,6 +243,11 @@ No application-specific timeline policy belongs here.
   are unchanged; CPU updates refuse GPU-written metadata. A native Metal
   producer interface is outside this extension.
 
+The shop presentation extension also offers `Window::drain_presented`, which
+appends timestamp pairs to caller-owned storage. The Metal callback queue keeps
+its capacity across drains; both sides reuse their allocations after warm-up.
+Its implementation and regression tests live in `fast::presentation`.
+
 When the check fails, move the change into a `fast/` module and leave a hook
 behind that names it; use `git diff <import_commit> -- <file>` to see what
 differs.

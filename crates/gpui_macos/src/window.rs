@@ -2159,6 +2159,10 @@ impl PlatformWindow for MacWindow {
         self.0.lock().renderer.take_presented()
     }
 
+    fn drain_presented(&self, fast_output: &mut Vec<(u64, u64)>) {
+        crate::fast::presentation::drain_presented(&self.0, fast_output)
+    }
+
     fn draw_composed(&self, scene: gpui::ComposedScene<'_>) {
         crate::fast::composition::draw_composed(&self.0, scene)
     }

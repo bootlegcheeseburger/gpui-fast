@@ -8,13 +8,24 @@ Remotes: `origin` is github.com/bootlegcheeseburger/gpui-fast; `upstream` is git
 
 | Patch | Subject | Upstreamable |
 |---|---|---|
-| a57ee60 | App menu item state: `App::on_validate_menu_item` returns a `MenuItemState` (enabled, checked, title) each time a menu opens; macOS applies it. | yes, generic and tested; touches many upstream files |
-| 700dc27 | Presented-frame timing: the display link's output time travels with the frame request, and `Window::take_presented` reports when each frame reached the display. | maybe; a new public API with cross-platform stubs |
-| f09f76f | `surface()` draws `420f` and `420v` buffers with the buffer's YCbCr matrix, and skips other formats with a one-time log instead of panicking. | yes, bug-fix shaped, Apple crate only |
-| 0dfb972 | File drags set the input modality to mouse, so a drop after keyboard input still reaches `on_drop`. | yes, small bug fix |
-| view-work | `gpui: Count layout work per view (test-support)`: dense view slots attribute created, claim-reused, kept, measured, shaped and dirtied work. | maybe, a new test-support API |
+| e11c1cc | App menu item state: `App::on_validate_menu_item` returns a `MenuItemState` (enabled, checked, title) each time a menu opens; macOS applies it. | yes, generic and tested; touches many upstream files |
+| 61b2051 | Presented-frame timing: the display link's output time travels with the frame request, and `Window::take_presented` reports when each frame reached the display. | maybe; a new public API with cross-platform stubs |
+| d687771 | `surface()` draws `420f` and `420v` buffers with the buffer's YCbCr matrix, and skips other formats with a one-time log instead of panicking. | yes, bug-fix shaped, Apple crate only |
+| 67f66a9 | File drags set the input modality to mouse, so a drop after keyboard input still reaches `on_drop`. | yes, small bug fix |
+| receipt-drain | `gpui: Drain presentation receipts into reusable buffers`: `Window::drain_presented` appends receipts while keeping the callback queue and caller buffer allocations. | yes, tested at queue capacity |
+| 5b80865 | `gpui: Count layout work per view (test-support)`: dense view slots attribute created, claim-reused, kept, measured, shaped and dirtied work. | maybe, a new test-support API |
 
-The named `view-work` row identifies its commit by subject. The hashes are the series on `shop/v0.1.12`; a rebase gives new hashes, and the table names each patch's hash on the newest branch. Planned: an input dispatch observer for the shop kit's input diagnostics More than about two new patches goes back to the person first (shop ruling, 2026-10-30).
+The named rows identify commits by subject. The hashes are the series on `shop/v0.1.14`; a rebase gives new hashes, and the table names each patch's hash on the newest branch. Planned: an input dispatch observer for the shop kit's input diagnostics More than about two new patches goes back to the person first (shop ruling, 2026-10-30).
+
+## Upstream-check baseline
+
+The existing shop patches predate the fast-only rule. Replaying them on
+`v0.1.14` (`a427a7d9a6072473ad092b1673cd5235f99284cc`) leaves 17 existing
+`script/check-upstream` violations. New patches keep their logic in `fast/`
+and add no new violations; migrating the legacy patches is separate work.
+The replay adapts the receipt callback and surface shader uniforms to objc2 Metal,
+uses the Metal display link's presentation target on macOS 14+, and imports the
+layout engine from its internal module for the per-view counters.
 
 ## Moving to a new upstream base
 
